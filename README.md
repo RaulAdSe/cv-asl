@@ -25,9 +25,10 @@ This project takes a "build-it-yourself" approach to hand detection, avoiding re
 - Motion-based fallback detection
 
 ### Stage D: Dataset builder
-- Interactive data collection tool
-- Auto-cropping and labeling
-- YOLO format export
+- ✅ Interactive data collection tool
+- ✅ Auto-cropping and labeling
+- ✅ Advanced background removal integration
+- ✅ YOLO format export
 
 ### Stage E: Train custom detector
 - Tiny-YOLO or custom CNN training
@@ -61,7 +62,8 @@ python -m asl_cam.collect --show-mask
 
 # Controls:
 # S - Save hand detection
-# M - Toggle mask view  
+# M - Toggle mask view
+# B - Toggle background removal  
 # T - Tune thresholds
 # Q - Quit
 ```
@@ -83,7 +85,8 @@ pytest tests/test_tracker.py
 src/asl_cam/
 ├── vision/                 # Core computer vision modules
 │   ├── skin.py            # Skin detection and segmentation
-│   ├── tracker.py         # Kalman filter-based tracking  
+│   ├── tracker.py         # Kalman filter-based tracking
+│   ├── background_removal.py # Advanced background removal methods
 │   └── detector/          # Future: Custom hand detector models
 ├── collect.py             # Interactive data collection CLI
 ├── preprocess.py          # Image preprocessing utilities
@@ -115,8 +118,17 @@ tests/                     # Comprehensive test suite
 - Real-time hand detection and tracking
 - Interactive sample collection
 - Automatic cropping and metadata saving
+- Advanced background removal (GrabCut, contour-based, skin masks)
+- Dual-version saving (original + background-removed)
 - YOLO format export for training
 - Progress tracking and statistics
+
+### Background Removal (`vision/background_removal.py`)
+- Multiple removal methods: GrabCut, contour masks, skin detection, MOG2, watershed
+- Configurable algorithms with quality vs. speed trade-offs
+- Transparent background generation
+- Visualization tools for method comparison
+- Integration with data collection pipeline
 
 ## 🎛️ Configuration
 

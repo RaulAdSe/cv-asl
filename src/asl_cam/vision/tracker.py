@@ -19,7 +19,7 @@ class TrackedHand:
 class HandTracker:
     """Single-hand tracker using Kalman filter."""
     
-    def __init__(self, max_disappeared: int = 30):
+    def __init__(self, max_disappeared: int = 15):  # Reduced for faster cleanup
         """
         Initialize hand tracker.
         
@@ -30,6 +30,9 @@ class HandTracker:
         self.next_id = 0
         self.tracked_hands: Dict[int, TrackedHand] = {}
         self.kalman_filters: Dict[int, cv2.KalmanFilter] = {}
+        
+        # Optimized distance threshold for better matching
+        self.distance_threshold = 80  # Reduced for tighter matching
         
     def _create_kalman_filter(self) -> cv2.KalmanFilter:
         """Create a Kalman filter for tracking hand position."""
@@ -50,14 +53,14 @@ class HandTracker:
             [0, 1, 0, 0]
         ], dtype=np.float32)
         
-        # Process noise covariance
-        kf.processNoiseCov = np.eye(4, dtype=np.float32) * 0.1
+        # Optimized process noise covariance (lower values for smoother tracking)
+        kf.processNoiseCov = np.eye(4, dtype=np.float32) * 0.05
         
-        # Measurement noise covariance
-        kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 0.1
+        # Optimized measurement noise covariance (higher confidence in measurements)
+        kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 0.05
         
         # Error covariance
-        kf.errorCovPost = np.eye(4, dtype=np.float32)
+        kf.errorCovPost = np.eye(4, dtype=np.float32) * 0.1
         
         return kf
     
@@ -95,9 +98,10 @@ class HandTracker:
             if len(detections) > 0:
                 self._match_detections(detections, predictions)
             
-            # Update time since last update
+            # Update time since last update for all tracks
             for hand in self.tracked_hands.values():
                 hand.time_since_update += 1
+                hand.age += 1
         
         # Remove old tracks
         self._cleanup_old_tracks()
@@ -126,7 +130,7 @@ class HandTracker:
         # Create Kalman filter
         kf = self._create_kalman_filter()
         
-        # Initialize state with current position
+        # Initialize state with current position and zero velocity
         kf.statePre = np.array([center[0], center[1], 0, 0], dtype=np.float32)
         kf.statePost = np.array([center[0], center[1], 0, 0], dtype=np.float32)
         
@@ -134,41 +138,37 @@ class HandTracker:
     
     def _match_detections(self, detections: List[Tuple[int, int, int, int]], 
                          predictions: Dict[int, Tuple[float, float]]) -> None:
-        """Match detections to existing tracks using Hungarian algorithm (simplified)."""
+        """Match detections to existing tracks using improved distance matching."""
         if len(detections) == 0:
             return
         
-        # For simplicity, use nearest neighbor matching for single hand
-        # In a full implementation, you'd use the Hungarian algorithm
-        
         detection_centers = [self._bbox_center(det) for det in detections]
         
-        # Find best matches
+        # Find best matches with improved algorithm
         matched_detections = set()
         matched_tracks = set()
         
+        # Create distance matrix for better matching
+        distances = {}
         for hand_id, pred_center in predictions.items():
             if hand_id not in self.tracked_hands:
                 continue
                 
-            best_distance = float('inf')
-            best_detection_idx = -1
-            
             for i, det_center in enumerate(detection_centers):
                 if i in matched_detections:
                     continue
                     
                 distance = self._distance(pred_center, det_center)
-                
-                # Distance threshold (should be tuned based on your setup)
-                if distance < 100 and distance < best_distance:
-                    best_distance = distance
-                    best_detection_idx = i
-            
-            # Update matched track
-            if best_detection_idx >= 0:
-                self._update_track(hand_id, detections[best_detection_idx])
-                matched_detections.add(best_detection_idx)
+                if distance < self.distance_threshold:
+                    distances[(hand_id, i)] = distance
+        
+        # Sort by distance and assign best matches
+        sorted_distances = sorted(distances.items(), key=lambda x: x[1])
+        
+        for (hand_id, det_idx), distance in sorted_distances:
+            if hand_id not in matched_tracks and det_idx not in matched_detections:
+                self._update_track(hand_id, detections[det_idx])
+                matched_detections.add(det_idx)
                 matched_tracks.add(hand_id)
         
         # Create new tracks for unmatched detections
@@ -192,8 +192,7 @@ class HandTracker:
         hand.bbox = bbox
         hand.center = center
         hand.hits += 1
-        hand.age += 1
-        hand.time_since_update = 0
+        hand.time_since_update = 0  # Reset time since update
     
     def _cleanup_old_tracks(self) -> None:
         """Remove tracks that haven't been updated for too long."""
@@ -208,16 +207,30 @@ class HandTracker:
             del self.kalman_filters[hand_id]
     
     def get_primary_hand(self) -> Optional[TrackedHand]:
-        """Get the most reliable tracked hand (highest hit count)."""
+        """Get the most reliable tracked hand (best stability score)."""
         if not self.tracked_hands:
             return None
         
-        # Return hand with most hits (most stable track)
-        return max(self.tracked_hands.values(), key=lambda h: h.hits)
+        # Calculate stability score: hits per age ratio, but require minimum hits
+        best_hand = None
+        best_score = 0
+        
+        for hand in self.tracked_hands.values():
+            if hand.hits >= 3:  # Require minimum stability
+                # Score based on hits/age ratio and recent updates
+                age_factor = max(hand.age, 1)  # Avoid division by zero
+                recency_factor = 1.0 / (hand.time_since_update + 1)  # Recent updates are better
+                stability_score = (hand.hits / age_factor) * recency_factor
+                
+                if stability_score > best_score:
+                    best_score = stability_score
+                    best_hand = hand
+        
+        return best_hand
     
     def draw_tracks(self, img: np.ndarray) -> np.ndarray:
         """
-        Draw tracked hands on image.
+        Draw tracked hands on image with enhanced visualization.
         
         Args:
             img: Input image
@@ -230,32 +243,41 @@ class HandTracker:
         for hand in self.tracked_hands.values():
             x, y, w, h = hand.bbox
             
-            # Choose color based on track stability
-            if hand.hits > 10:
-                color = (0, 255, 0)  # Green for stable tracks
-            elif hand.hits > 5:
-                color = (0, 255, 255)  # Yellow for medium stability
+            # Choose color and thickness based on track stability
+            if hand.hits >= 10:
+                color = (0, 255, 0)  # Green for very stable tracks
+                thickness = 3
+            elif hand.hits >= 5:
+                color = (0, 255, 255)  # Yellow for stable tracks
+                thickness = 2
             else:
-                color = (0, 0, 255)  # Red for new tracks
+                color = (0, 0, 255)  # Red for new/unstable tracks
+                thickness = 2
             
             # Draw bounding box
-            cv2.rectangle(result, (x, y), (x + w, y + h), color, 2)
+            cv2.rectangle(result, (x, y), (x + w, y + h), color, thickness)
             
-            # Draw center point
+            # Draw center point with tracking trail effect
             center_int = (int(hand.center[0]), int(hand.center[1]))
-            cv2.circle(result, center_int, 3, color, -1)
+            cv2.circle(result, center_int, 4, color, -1)
+            cv2.circle(result, center_int, 8, color, 1)
             
-            # Add track info
-            info_text = f"ID:{hand.id} H:{hand.hits}"
-            cv2.putText(result, info_text, (x, y - 10), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            # Add comprehensive track info
+            stability_score = hand.hits / max(hand.age, 1)
+            info_text = f"ID:{hand.id} H:{hand.hits} S:{stability_score:.2f}"
+            
+            # Add text background for better readability
+            text_size = cv2.getTextSize(info_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
+            cv2.rectangle(result, (x, y - 20), (x + text_size[0] + 5, y), color, -1)
+            cv2.putText(result, info_text, (x + 2, y - 5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
         
         return result
 
 class MultiHandTracker:
     """Multi-hand tracker using multiple Kalman filters."""
     
-    def __init__(self, max_hands: int = 2, max_disappeared: int = 30):
+    def __init__(self, max_hands: int = 2, max_disappeared: int = 15):
         """
         Initialize multi-hand tracker.
         
@@ -268,13 +290,22 @@ class MultiHandTracker:
     
     def update(self, detections: List[Tuple[int, int, int, int]]) -> List[TrackedHand]:
         """Update tracker with new detections."""
-        # Limit detections to max_hands
-        limited_detections = detections[:self.max_hands]
-        return self.tracker.update(limited_detections)
+        # Limit detections to max_hands (take largest ones first)
+        if len(detections) > self.max_hands:
+            # Sort by area and take the largest ones
+            detection_areas = [(det, (det[2] * det[3])) for det in detections]
+            detection_areas.sort(key=lambda x: x[1], reverse=True)
+            detections = [det for det, _ in detection_areas[:self.max_hands]]
+        
+        return self.tracker.update(detections)
     
     def get_hands(self) -> List[TrackedHand]:
         """Get all currently tracked hands."""
         return list(self.tracker.tracked_hands.values())
+    
+    def get_primary_hand(self) -> Optional[TrackedHand]:
+        """Get the most stable tracked hand."""
+        return self.tracker.get_primary_hand()
     
     def draw_tracks(self, img: np.ndarray) -> np.ndarray:
         """Draw all tracked hands."""

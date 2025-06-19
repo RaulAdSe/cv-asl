@@ -9,16 +9,17 @@ class SkinDetector:
     """Classical skin detection using color space thresholding."""
     
     def __init__(self):
-        # HSV thresholds (covers most skin tones)
-        self.hsv_lower = np.array([0, 30, 60])
-        self.hsv_upper = np.array([20, 150, 255])
+        # Optimized HSV thresholds (broader range for different skin tones)
+        self.hsv_lower = np.array([0, 20, 70])
+        self.hsv_upper = np.array([25, 255, 255])
         
-        # YCrCb thresholds (more robust for skin)
-        self.ycrcb_lower = np.array([0, 133, 77])
-        self.ycrcb_upper = np.array([255, 173, 127])
+        # Optimized YCrCb thresholds (more robust for skin detection)
+        self.ycrcb_lower = np.array([0, 135, 85])
+        self.ycrcb_upper = np.array([255, 180, 135])
         
-        # Morphological kernel
-        self.kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        # Larger morphological kernel for better noise removal
+        self.kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        self.small_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     
     def detect_skin_mask(self, img_bgr: np.ndarray) -> np.ndarray:
         """
@@ -30,9 +31,12 @@ class SkinDetector:
         Returns:
             Binary mask where skin pixels are white (255)
         """
+        # Apply slight Gaussian blur to reduce noise
+        blurred = cv2.GaussianBlur(img_bgr, (3, 3), 0)
+        
         # Convert to HSV and YCrCb
-        hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-        ycrcb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2YCrCb)
+        hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+        ycrcb = cv2.cvtColor(blurred, cv2.COLOR_BGR2YCrCb)
         
         # Create masks in both color spaces
         hsv_mask = cv2.inRange(hsv, self.hsv_lower, self.hsv_upper)
@@ -41,22 +45,26 @@ class SkinDetector:
         # Combine masks (intersection for stricter detection)
         combined_mask = cv2.bitwise_and(hsv_mask, ycrcb_mask)
         
-        # Clean up with morphological operations
-        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, self.kernel)
-        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, self.kernel)
+        # Enhanced morphological operations
+        # Opening to remove noise
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, self.small_kernel, iterations=2)
+        # Closing to fill holes
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, self.kernel, iterations=3)
+        # Dilation to make hands more solid
+        combined_mask = cv2.dilate(combined_mask, self.kernel, iterations=2)
         
-        # Blur to smooth edges
-        combined_mask = cv2.medianBlur(combined_mask, 5)
+        # Final median blur to smooth edges
+        combined_mask = cv2.medianBlur(combined_mask, 7)
         
         return combined_mask
     
-    def find_hand_contours(self, mask: np.ndarray, min_area: int = 1000) -> List[np.ndarray]:
+    def find_hand_contours(self, mask: np.ndarray, min_area: int = 2000) -> List[np.ndarray]:
         """
         Find hand contours from skin mask.
         
         Args:
             mask: Binary skin mask
-            min_area: Minimum contour area to consider
+            min_area: Minimum contour area to consider (increased for better filtering)
             
         Returns:
             List of contours sorted by area (largest first)
@@ -64,19 +72,41 @@ class SkinDetector:
         # Find contours
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        # Filter by area and sort by size
-        valid_contours = [c for c in contours if cv2.contourArea(c) >= min_area]
+        # Filter by area, aspect ratio, and convexity for hand-like shapes
+        valid_contours = []
+        for c in contours:
+            area = cv2.contourArea(c)
+            if area < min_area:
+                continue
+                
+            # Check aspect ratio (hands are roughly rectangular)
+            x, y, w, h = cv2.boundingRect(c)
+            aspect_ratio = float(w) / h
+            if aspect_ratio < 0.3 or aspect_ratio > 3.0:  # Filter out very thin or very wide shapes
+                continue
+                
+            # Check solidity (filled area vs convex hull area)
+            hull = cv2.convexHull(c)
+            hull_area = cv2.contourArea(hull)
+            if hull_area > 0:
+                solidity = area / hull_area
+                if solidity < 0.6:  # Hands should be reasonably solid
+                    continue
+            
+            valid_contours.append(c)
+        
+        # Sort by area (largest first)
         valid_contours.sort(key=cv2.contourArea, reverse=True)
         
         return valid_contours
     
-    def get_hand_bbox(self, contour: np.ndarray, padding: int = 10) -> Tuple[int, int, int, int]:
+    def get_hand_bbox(self, contour: np.ndarray, padding: int = 15) -> Tuple[int, int, int, int]:
         """
         Get bounding box from contour with padding.
         
         Args:
             contour: Hand contour
-            padding: Pixels to add around the bounding box
+            padding: Pixels to add around the bounding box (increased for better crops)
             
         Returns:
             (x, y, w, h) bounding box coordinates
@@ -132,20 +162,31 @@ class SkinDetector:
         # Detect hands
         hands = self.detect_hands(img_bgr)
         
-        # Draw bounding boxes
+        # Draw bounding boxes with enhanced visualization
         for i, (x, y, w, h) in enumerate(hands):
-            # Draw bounding box
-            cv2.rectangle(result, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            # Draw thick bounding box
+            cv2.rectangle(result, (x, y), (x + w, y + h), (0, 255, 0), 3)
             
-            # Add label
-            cv2.putText(result, f"Hand {i+1}", (x, y - 10), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            # Add corner markers for better visibility
+            corner_size = 10
+            corners = [
+                (x, y), (x + w, y), (x, y + h), (x + w, y + h)
+            ]
+            for corner in corners:
+                cv2.circle(result, corner, corner_size//2, (0, 255, 0), -1)
+            
+            # Add label with background
+            label = f"Hand {i+1}"
+            label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
+            cv2.rectangle(result, (x, y - 30), (x + label_size[0] + 10, y), (0, 255, 0), -1)
+            cv2.putText(result, label, (x + 5, y - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
         
         # Optionally show mask overlay
         if show_mask:
             mask = self.detect_skin_mask(img_bgr)
             mask_colored = cv2.applyColorMap(mask, cv2.COLORMAP_JET)
-            result = cv2.addWeighted(result, 0.7, mask_colored, 0.3, 0)
+            result = cv2.addWeighted(result, 0.75, mask_colored, 0.25, 0)
         
         return result
     

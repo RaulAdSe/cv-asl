@@ -1,5 +1,18 @@
 """
 Dataset builder CLI for collecting hand images and labels.
+
+This module provides interactive data collection with integrated background removal
+to create clean training datasets that match the target model format. The collector
+can optionally apply advanced background removal techniques (GrabCut, contour-based,
+skin detection, etc.) to create clean hand images while preserving original versions
+for comparison.
+
+Features:
+- Real-time hand detection and tracking
+- Quality-controlled sample collection
+- Multiple background removal methods
+- Comprehensive metadata tracking
+- YOLO format export capability
 """
 import cv2
 import numpy as np
@@ -12,7 +25,8 @@ from typing import List, Tuple, Optional, Dict
 from dataclasses import dataclass, asdict
 
 from .vision.skin import SkinDetector
-from .vision.tracker import HandTracker, TrackedHand
+from .vision.tracker import MultiHandTracker, TrackedHand
+from .vision.background_removal import BackgroundRemover, BackgroundMethod
 
 @dataclass
 class Sample:
@@ -41,15 +55,25 @@ class DataCollector:
         (self.data_dir / "images").mkdir(exist_ok=True)
         (self.data_dir / "annotations").mkdir(exist_ok=True)
         
-        # Initialize components
+        # Initialize components with optimized settings
         self.detector = SkinDetector()
-        self.tracker = HandTracker()
+        self.tracker = MultiHandTracker(max_hands=1, max_disappeared=10)  # Single hand, faster cleanup
+        self.bg_remover = BackgroundRemover(BackgroundMethod.GRABCUT)  # High-quality background removal
         
         # Collection state
         self.samples: List[Sample] = []
         self.current_label = "hand"
         self.sample_count = 0
-        self.batch_size = 10  # Save every N samples
+        self.batch_size = 5  # Save more frequently for safety
+        
+        # Quality control parameters
+        self.min_stability_hits = 8  # Require more stability before allowing collection
+        self.min_hand_size = 50      # Minimum hand size (width or height)
+        self.max_hand_size = 400     # Maximum hand size to filter out false positives
+        
+        # Background removal settings
+        self.use_background_removal = True  # Enable background removal for training data
+        self.save_both_versions = True      # Save both original and background-removed versions
         
         # Load existing data
         self._load_existing_data()
@@ -70,11 +94,53 @@ class DataCollector:
         manifest_data = {
             'samples': [asdict(sample) for sample in self.samples],
             'created': time.time(),
-            'total_samples': len(self.samples)
+            'total_samples': len(self.samples),
+            'current_label': self.current_label,
+            'collection_settings': {
+                'min_stability_hits': self.min_stability_hits,
+                'min_hand_size': self.min_hand_size,
+                'max_hand_size': self.max_hand_size,
+                'use_background_removal': self.use_background_removal,
+                'save_both_versions': self.save_both_versions,
+                'bg_removal_method': self.bg_remover.method.value
+            }
         }
         
         with open(manifest_file, 'w') as f:
             json.dump(manifest_data, f, indent=2)
+    
+    def _is_hand_valid_for_collection(self, hand: TrackedHand) -> Tuple[bool, str]:
+        """
+        Check if a tracked hand is valid for data collection.
+        
+        Args:
+            hand: Tracked hand object
+            
+        Returns:
+            (is_valid, reason) - validation result and reason
+        """
+        # Check stability
+        if hand.hits < self.min_stability_hits:
+            return False, f"Not stable enough (hits: {hand.hits}, need: {self.min_stability_hits})"
+        
+        # Check recent updates
+        if hand.time_since_update > 2:
+            return False, f"Hand not recently detected (last update: {hand.time_since_update} frames ago)"
+        
+        # Check hand size
+        x, y, w, h = hand.bbox
+        if w < self.min_hand_size or h < self.min_hand_size:
+            return False, f"Hand too small ({w}x{h}, min: {self.min_hand_size})"
+            
+        if w > self.max_hand_size or h > self.max_hand_size:
+            return False, f"Hand too large ({w}x{h}, max: {self.max_hand_size})"
+        
+        # Check aspect ratio (hands shouldn't be too elongated)
+        aspect_ratio = max(w, h) / min(w, h)
+        if aspect_ratio > 2.5:
+            return False, f"Hand aspect ratio too extreme ({aspect_ratio:.1f})"
+        
+        return True, "Valid for collection"
     
     def _save_sample(self, frame: np.ndarray, bbox: Tuple[int, int, int, int], 
                     confidence: float) -> str:
@@ -89,14 +155,14 @@ class DataCollector:
         Returns:
             Path to saved image
         """
-        # Generate filename
+        # Generate filename with more info
         timestamp = time.time()
         filename = f"{self.current_label}_{self.sample_count:06d}_{int(timestamp)}.jpg"
         image_path = self.data_dir / "images" / filename
         
-        # Extract hand crop with padding
+        # Extract hand crop with optimized padding
         x, y, w, h = bbox
-        padding = 20
+        padding = max(20, min(w, h) // 4)  # Adaptive padding based on hand size
         x1 = max(0, x - padding)
         y1 = max(0, y - padding)
         x2 = min(frame.shape[1], x + w + padding)
@@ -104,12 +170,30 @@ class DataCollector:
         
         hand_crop = frame[y1:y2, x1:x2]
         
-        # Save full frame and crop
-        cv2.imwrite(str(image_path), frame)
-        crop_path = str(image_path).replace('.jpg', '_crop.jpg')
-        cv2.imwrite(crop_path, hand_crop)
+        # Apply background removal if enabled
+        processed_crop = hand_crop
+        bg_removed_crop = None
+        if self.use_background_removal:
+            # Apply background removal to get clean hand image
+            # Create relative bbox for the crop (since crop is already extracted)
+            crop_bbox = (0, 0, hand_crop.shape[1], hand_crop.shape[0])
+            result = self.bg_remover.remove_background(hand_crop, crop_bbox)
+            if result is not None:
+                bg_removed_crop, mask = result  # Unpack the tuple
+                if bg_removed_crop is not None:
+                    processed_crop = bg_removed_crop
         
-        # Create sample record
+        # Save full frame and crop
+        cv2.imwrite(str(image_path), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        crop_path = str(image_path).replace('.jpg', '_crop.jpg')
+        cv2.imwrite(crop_path, processed_crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        
+        # Optionally save original crop version as well
+        if self.save_both_versions and bg_removed_crop is not None:
+            original_crop_path = str(image_path).replace('.jpg', '_crop_original.jpg')
+            cv2.imwrite(original_crop_path, hand_crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        
+        # Create comprehensive sample record
         sample = Sample(
             image_path=str(image_path),
             bbox=bbox,
@@ -121,7 +205,13 @@ class DataCollector:
                 'frame_shape': frame.shape,
                 'hand_crop_shape': hand_crop.shape,
                 'original_bbox': bbox,
-                'padded_bbox': (x1, y1, x2-x1, y2-y1)
+                'padded_bbox': (x1, y1, x2-x1, y2-y1),
+                'hand_area': w * h,
+                'padding_used': padding,
+                'aspect_ratio': w / h,
+                'background_removed': self.use_background_removal and bg_removed_crop is not None,
+                'original_crop_path': str(image_path).replace('.jpg', '_crop_original.jpg') if self.save_both_versions and bg_removed_crop is not None else None,
+                'bg_removal_method': self.bg_remover.method.value if self.use_background_removal else None
             }
         )
         
@@ -147,26 +237,38 @@ class DataCollector:
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open camera {camera_id}")
         
-        # Set camera properties
+        # Optimized camera properties for better performance
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         cap.set(cv2.CAP_PROP_FPS, 30)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer for lower latency
         
-        print("\n=== Data Collection Mode ===")
+        print("\n=== Optimized Data Collection Mode ===")
         print(f"Current label: {self.current_label}")
         print(f"Samples collected: {self.sample_count}")
+        print(f"Quality requirements:")
+        print(f"  - Minimum stability: {self.min_stability_hits} hits")
+        print(f"  - Hand size range: {self.min_hand_size}-{self.max_hand_size} pixels")
+        print(f"  - Maximum aspect ratio: 2.5")
         print("\nControls:")
-        print("  S - Save current hand detection")
+        print("  S - Save current hand detection (if valid)")
         print("  L - Change label")
         print("  M - Toggle mask view")
+        print("  B - Toggle background removal")
         print("  T - Tune detection thresholds")
+        print("  R - Reset tracker")
         print("  Q - Quit")
-        print("\nPosition your hand in the frame and press 'S' to save samples...")
+        print("\nPosition your hand in the frame and wait for GREEN 'READY' status...")
+        
+        frames_processed = 0
+        start_time = time.time()
         
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
+            
+            frames_processed += 1
             
             # Detect hands
             hands = self.detector.detect_hands(frame, max_hands=1)
@@ -181,26 +283,50 @@ class DataCollector:
                 display_frame = frame.copy()
             
             # Draw tracking information
-            if tracked_hands:
-                display_frame = self.tracker.draw_tracks(display_frame)
-                
-                # Show collection status
-                primary_hand = self.tracker.get_primary_hand()
-                if primary_hand and primary_hand.hits > 5:
+            display_frame = self.tracker.draw_tracks(display_frame)
+            
+            # Check collection readiness
+            collection_ready = False
+            primary_hand = self.tracker.get_primary_hand()
+            status_message = "No stable hand detected"
+            status_color = (0, 0, 255)  # Red
+            
+            if primary_hand:
+                is_valid, reason = self._is_hand_valid_for_collection(primary_hand)
+                if is_valid:
+                    collection_ready = True
+                    status_message = "READY TO COLLECT"
+                    status_color = (0, 255, 0)  # Green
+                    
+                    # Add collection indicator
                     x, y, w, h = primary_hand.bbox
-                    cv2.putText(display_frame, "READY TO COLLECT", (x, y + h + 20),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    cv2.rectangle(display_frame, (x-5, y-5), (x+w+5, y+h+5), (0, 255, 0), 3)
+                else:
+                    status_message = f"Not ready: {reason}"
+                    status_color = (0, 255, 255)  # Yellow
             
-            # Add UI info
-            info_y = 30
-            cv2.putText(display_frame, f"Label: {self.current_label}", (10, info_y),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            cv2.putText(display_frame, f"Samples: {self.sample_count}", (10, info_y + 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            cv2.putText(display_frame, f"Hands: {len(tracked_hands)}", (10, info_y + 60),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            # Add comprehensive UI info
+            info_y = 25
+            line_height = 25
             
-            cv2.imshow('Data Collection', display_frame)
+            # Status
+            cv2.putText(display_frame, status_message, (10, info_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
+            info_y += line_height
+            
+            # Collection info
+            bg_status = "BG-Remove: ON" if self.use_background_removal else "BG-Remove: OFF"
+            cv2.putText(display_frame, f"Label: {self.current_label} | Samples: {self.sample_count} | {bg_status}", 
+                       (10, info_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            info_y += line_height
+            
+            # Performance info
+            if frames_processed % 30 == 0:  # Update every 30 frames
+                fps = frames_processed / (time.time() - start_time)
+                cv2.putText(display_frame, f"FPS: {fps:.1f} | Hands: {len(tracked_hands)}", 
+                           (10, info_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+            
+            cv2.imshow('ASL Data Collection', display_frame)
             
             # Handle key presses
             key = cv2.waitKey(1) & 0xFF
@@ -209,19 +335,17 @@ class DataCollector:
                 break
             elif key == ord('s'):
                 # Save sample
-                if tracked_hands:
-                    primary_hand = self.tracker.get_primary_hand()
-                    if primary_hand and primary_hand.hits > 5:
-                        confidence = min(1.0, primary_hand.hits / 20.0)
-                        image_path = self._save_sample(frame, primary_hand.bbox, confidence)
-                        print(f"Saved sample {self.sample_count}: {image_path}")
-                    else:
-                        print("Hand not stable enough for collection")
+                if collection_ready and primary_hand:
+                    confidence = min(1.0, primary_hand.hits / 20.0)
+                    image_path = self._save_sample(frame, primary_hand.bbox, confidence)
+                    print(f"✓ Saved sample {self.sample_count}: {image_path}")
+                    print(f"  Hand size: {primary_hand.bbox[2]}x{primary_hand.bbox[3]}")
+                    print(f"  Stability: {primary_hand.hits} hits")
                 else:
-                    print("No hands detected")
+                    print(f"✗ Cannot save: {status_message}")
             elif key == ord('l'):
                 # Change label
-                new_label = input("Enter new label: ").strip()
+                new_label = input("\nEnter new label: ").strip()
                 if new_label:
                     self.current_label = new_label
                     print(f"Label changed to: {self.current_label}")
@@ -229,17 +353,27 @@ class DataCollector:
                 # Toggle mask view
                 show_mask = not show_mask
                 print(f"Mask view: {'ON' if show_mask else 'OFF'}")
+            elif key == ord('b'):
+                # Toggle background removal
+                self.use_background_removal = not self.use_background_removal
+                print(f"Background removal: {'ON' if self.use_background_removal else 'OFF'}")
             elif key == ord('t'):
                 # Tune thresholds
                 print("Opening threshold tuning...")
                 self.detector.tune_thresholds(frame)
+            elif key == ord('r'):
+                # Reset tracker
+                self.tracker = MultiHandTracker(max_hands=1, max_disappeared=10)
+                print("Tracker reset")
         
         cap.release()
         cv2.destroyAllWindows()
         
         # Save final manifest
         self._save_manifest()
-        print(f"Collection finished. Total samples: {self.sample_count}")
+        print(f"\nCollection finished!")
+        print(f"Total samples collected: {self.sample_count}")
+        print(f"Average FPS: {frames_processed / (time.time() - start_time):.1f}")
     
     def export_yolo_format(self, output_dir: str) -> None:
         """
@@ -260,10 +394,26 @@ class DataCollector:
             for label in unique_labels:
                 f.write(f"{label}\n")
         
+        # Save dataset info
+        dataset_info = {
+            'total_samples': len(self.samples),
+            'classes': unique_labels,
+            'label_distribution': {label: sum(1 for s in self.samples if s.label == label) 
+                                 for label in unique_labels},
+            'export_timestamp': time.time()
+        }
+        
+        with open(output_path / "dataset_info.json", 'w') as f:
+            json.dump(dataset_info, f, indent=2)
+        
         # Convert samples
         for sample in self.samples:
             # Load image to get dimensions
             img = cv2.imread(sample.image_path)
+            if img is None:
+                print(f"Warning: Could not load image {sample.image_path}")
+                continue
+                
             h, w = img.shape[:2]
             
             # Convert bbox to YOLO format (normalized center coordinates)
@@ -283,9 +433,10 @@ class DataCollector:
         
         print(f"Exported {len(self.samples)} samples to YOLO format in {output_path}")
         print(f"Classes: {unique_labels}")
+        print(f"Dataset info saved to: {output_path}/dataset_info.json")
     
     def get_statistics(self) -> Dict:
-        """Get collection statistics."""
+        """Get comprehensive collection statistics."""
         if not self.samples:
             return {"total_samples": 0}
         
@@ -294,16 +445,35 @@ class DataCollector:
         label_counts = Counter(sample.label for sample in self.samples)
         confidence_avg = np.mean([sample.confidence for sample in self.samples])
         
+        # Analyze hand sizes
+        areas = [sample.metadata.get('hand_area', 0) for sample in self.samples]
+        aspect_ratios = [sample.metadata.get('aspect_ratio', 1.0) for sample in self.samples]
+        
         return {
             "total_samples": len(self.samples),
             "labels": dict(label_counts),
             "average_confidence": confidence_avg,
+            "hand_size_stats": {
+                "min_area": min(areas) if areas else 0,
+                "max_area": max(areas) if areas else 0,
+                "avg_area": np.mean(areas) if areas else 0
+            },
+            "aspect_ratio_stats": {
+                "min": min(aspect_ratios) if aspect_ratios else 0,
+                "max": max(aspect_ratios) if aspect_ratios else 0,
+                "avg": np.mean(aspect_ratios) if aspect_ratios else 0
+            },
+            "quality_settings": {
+                "min_stability_hits": self.min_stability_hits,
+                "min_hand_size": self.min_hand_size,
+                "max_hand_size": self.max_hand_size
+            },
             "data_directory": str(self.data_dir)
         }
 
 def main():
     """CLI entry point."""
-    parser = argparse.ArgumentParser(description="ASL Hand Detection Data Collector")
+    parser = argparse.ArgumentParser(description="Optimized ASL Hand Detection Data Collector")
     parser.add_argument("--data-dir", default="data/raw", 
                        help="Directory to save collected data")
     parser.add_argument("--camera", type=int, default=0,
@@ -323,7 +493,12 @@ def main():
         stats = collector.get_statistics()
         print("\n=== Collection Statistics ===")
         for key, value in stats.items():
-            print(f"{key}: {value}")
+            if isinstance(value, dict):
+                print(f"{key}:")
+                for subkey, subvalue in value.items():
+                    print(f"  {subkey}: {subvalue}")
+            else:
+                print(f"{key}: {value}")
     elif args.export_yolo:
         collector.export_yolo_format(args.export_yolo)
     else:
