@@ -78,8 +78,8 @@ class HandTracker:
     def update(self, new_bbox: tuple):
         """Updates the Kalman Filter with a new measurement."""
         if new_bbox is None:
-            # If we didn't get a measurement, start the lost counter
-            if self.is_tracking:
+            # If we didn't get a measurement, start the lost counter only if it's not already running.
+            if self.is_tracking and self.lost_counter == 0:
                 self.lost_counter = 1
             return
             
