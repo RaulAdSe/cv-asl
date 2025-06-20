@@ -87,7 +87,7 @@ class BackgroundRemover:
             return frame, np.zeros(frame.shape[:2], dtype=np.uint8)
 
         # Get the foreground mask with a learning rate of 0 to prevent the hand from being learned.
-        fg_mask = self.bg_subtractor.apply(frame, learningRate=self.learning_rate)
+        fg_mask = self.bg_subtractor.apply(frame, learningRate=0)
 
         # Apply morphological operations to clean up the mask and remove noise
         # Using a smaller kernel and fewer iterations to be less aggressive
