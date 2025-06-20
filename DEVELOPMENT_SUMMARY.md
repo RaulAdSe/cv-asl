@@ -27,6 +27,7 @@
 - Live visualization of detection process
 - Real-time parameter adjustment
 - Visual feedback with color-coded detection states
+- **NEW: Hand data capture and analysis** (Press `C` key)
 
 ## 🔄 Development Evolution
 
@@ -66,6 +67,7 @@ python -m src.asl_cam.collect
 # P - Adjust hand persistence (tracking stability)  
 # M/K - Show motion/skin masks
 # B - Toggle background removal
+# C - Capture and visualize hand data (detailed analysis)
 ```
 
 ## 📊 Technical Results

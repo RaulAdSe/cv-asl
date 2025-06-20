@@ -232,6 +232,194 @@ class DataCollector:
         
         return str(image_path)
     
+    def _capture_and_visualize_hand_data(self, frame: np.ndarray, hand: 'TrackedHand') -> None:
+        """
+        Capture and visualize detailed hand data in a separate window.
+        
+        Args:
+            frame: Current frame
+            hand: Tracked hand object
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+        
+        # Extract hand region
+        x, y, w, h = hand.bbox
+        hand_crop = frame[y:y+h, x:x+w].copy()
+        
+        # Get detection masks
+        skin_mask = self.detector.detect_skin_mask(frame)
+        motion_mask = self.detector.detect_motion_mask(frame)
+        
+        # Extract mask regions
+        skin_crop = skin_mask[y:y+h, x:x+w]
+        motion_crop = motion_mask[y:y+h, x:x+w]
+        
+        # Apply background removal if enabled
+        processed_crop = hand_crop.copy()
+        if self.use_background_removal:
+            crop_bbox = (0, 0, hand_crop.shape[1], hand_crop.shape[0])
+            result = self.bg_remover.remove_background(hand_crop, crop_bbox)
+            if result is not None:
+                bg_removed_crop, mask = result
+                if bg_removed_crop is not None:
+                    processed_crop = bg_removed_crop
+        
+        # Create visualization
+        plt.figure(figsize=(15, 10))
+        plt.suptitle(f'Hand Data Capture - Label: {self.current_label}', fontsize=16, fontweight='bold')
+        
+        # Original hand crop
+        plt.subplot(2, 4, 1)
+        plt.imshow(cv2.cvtColor(hand_crop, cv2.COLOR_BGR2RGB))
+        plt.title(f'Original Hand Crop\n{w}x{h} pixels')
+        plt.axis('off')
+        
+        # Processed hand crop (with background removal if enabled)
+        plt.subplot(2, 4, 2)
+        if self.use_background_removal and processed_crop is not hand_crop:
+            plt.imshow(cv2.cvtColor(processed_crop, cv2.COLOR_BGR2RGB))
+            plt.title('Background Removed')
+        else:
+            plt.imshow(cv2.cvtColor(hand_crop, cv2.COLOR_BGR2RGB))
+            plt.title('Processed Crop\n(No BG removal)')
+        plt.axis('off')
+        
+        # Skin mask
+        plt.subplot(2, 4, 3)
+        plt.imshow(skin_crop, cmap='Reds')
+        plt.title('Skin Detection Mask')
+        plt.axis('off')
+        
+        # Motion mask
+        plt.subplot(2, 4, 4)
+        plt.imshow(motion_crop, cmap='Blues')
+        plt.title('Motion Detection Mask')
+        plt.axis('off')
+        
+        # Hand data info
+        plt.subplot(2, 4, 5)
+        plt.axis('off')
+        
+        # Calculate some statistics
+        skin_pixels = np.sum(skin_crop > 0)
+        motion_pixels = np.sum(motion_crop > 0)
+        total_pixels = w * h
+        
+        info_text = f"""Hand Information:
+        
+Size: {w} × {h} pixels
+Area: {total_pixels:,} pixels
+Aspect Ratio: {w/h:.2f}
+
+Tracking:
+Stability: {hand.hits} hits
+Confidence: {min(1.0, hand.hits / 20.0):.2f}
+
+Detection:
+Skin pixels: {skin_pixels:,} ({100*skin_pixels/total_pixels:.1f}%)
+Motion pixels: {motion_pixels:,} ({100*motion_pixels/total_pixels:.1f}%)
+
+Settings:
+Label: {self.current_label}
+Motion detection: {'ON' if self.use_motion_detection else 'OFF'}
+Background removal: {'ON' if self.use_background_removal else 'OFF'}
+Persistence: {self.detector.max_persistence_frames}f
+"""
+        
+        plt.text(0.05, 0.95, info_text, transform=plt.gca().transAxes, 
+                fontsize=10, verticalalignment='top', fontfamily='monospace')
+        
+        # Full frame context
+        plt.subplot(2, 4, 6)
+        frame_display = frame.copy()
+        # Draw hand bbox
+        cv2.rectangle(frame_display, (x, y), (x+w, y+h), (0, 255, 0), 2)
+        cv2.putText(frame_display, f'Hand: {w}x{h}', (x, y-10), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        
+        plt.imshow(cv2.cvtColor(frame_display, cv2.COLOR_BGR2RGB))
+        plt.title('Full Frame Context')
+        plt.axis('off')
+        
+        # Combined masks visualization
+        plt.subplot(2, 4, 7)
+        combined = np.zeros_like(hand_crop)
+        if len(hand_crop.shape) == 3:
+            combined[:, :, 0] = motion_crop  # Red channel for motion
+            combined[:, :, 1] = skin_crop   # Green channel for skin
+            overlap = np.logical_and(skin_crop > 0, motion_crop > 0)
+            combined[overlap, 2] = 255      # Blue for overlap
+        
+        plt.imshow(combined)
+        plt.title('Combined Masks\nRed=Motion, Green=Skin, Blue=Both')
+        plt.axis('off')
+        
+        # Histogram of hand crop
+        plt.subplot(2, 4, 8)
+        if len(hand_crop.shape) == 3:
+            for i, color in enumerate(['b', 'g', 'r']):
+                hist = cv2.calcHist([hand_crop], [i], None, [256], [0, 256])
+                plt.plot(hist, color=color, alpha=0.7, label=f'Channel {i}')
+        plt.title('Color Histogram')
+        plt.xlabel('Pixel Intensity')
+        plt.ylabel('Frequency')
+        plt.legend()
+        
+        plt.tight_layout()
+        plt.show(block=False)  # Non-blocking to allow continued collection
+        
+        # Save capture data if requested
+        timestamp = time.time()
+        capture_dir = Path(self.data_dir) / "captures"
+        capture_dir.mkdir(exist_ok=True)
+        
+        capture_base = capture_dir / f"capture_{self.current_label}_{timestamp:.0f}"
+        
+        # Save images
+        cv2.imwrite(f"{capture_base}_original.jpg", hand_crop)
+        cv2.imwrite(f"{capture_base}_processed.jpg", processed_crop)
+        cv2.imwrite(f"{capture_base}_skin_mask.jpg", skin_crop)
+        cv2.imwrite(f"{capture_base}_motion_mask.jpg", motion_crop)
+        
+        # Save metadata
+        capture_metadata = {
+            'timestamp': timestamp,
+            'label': self.current_label,
+            'bbox': hand.bbox,
+            'hand_size': [w, h],
+            'hand_area': total_pixels,
+            'aspect_ratio': w / h,
+            'tracking_hits': hand.hits,
+            'confidence': min(1.0, hand.hits / 20.0),
+            'skin_pixels': int(skin_pixels),
+            'motion_pixels': int(motion_pixels),
+            'skin_percentage': float(100 * skin_pixels / total_pixels),
+            'motion_percentage': float(100 * motion_pixels / total_pixels),
+            'settings': {
+                'motion_detection': self.use_motion_detection,
+                'background_removal': self.use_background_removal,
+                'persistence_frames': self.detector.max_persistence_frames
+            },
+            'files': {
+                'original': f"{capture_base.name}_original.jpg",
+                'processed': f"{capture_base.name}_processed.jpg", 
+                'skin_mask': f"{capture_base.name}_skin_mask.jpg",
+                'motion_mask': f"{capture_base.name}_motion_mask.jpg"
+            }
+        }
+        
+        with open(f"{capture_base}_metadata.json", 'w') as f:
+            json.dump(capture_metadata, f, indent=2)
+        
+        print(f"\n✓ Hand data captured and visualized!")
+        print(f"  Size: {w}×{h} pixels ({total_pixels:,} total)")
+        print(f"  Tracking: {hand.hits} hits (confidence: {min(1.0, hand.hits / 20.0):.2f})")
+        print(f"  Skin coverage: {100*skin_pixels/total_pixels:.1f}%")
+        print(f"  Motion coverage: {100*motion_pixels/total_pixels:.1f}%")
+        print(f"  Files saved to: {capture_dir}")
+        print(f"  Close the visualization window when done viewing.")
+
     def collect_interactive(self, camera_id: int = 0, show_mask: bool = False) -> None:
         """
         Interactive data collection from camera.
@@ -265,6 +453,7 @@ class DataCollector:
         print("  B - Toggle background removal")
         print("  X - Toggle motion detection (filters out static torso)")
         print("  P - Adjust hand persistence (how long to keep tracking still hands)")
+        print("  C - Capture and visualize current hand data")
         print("  R - Reset motion detection & tracker")
         print("  T - Tune detection thresholds")
         print("  Q - Quit")
@@ -393,6 +582,12 @@ class DataCollector:
                 elif choice == '3':
                     self.detector.max_persistence_frames = 60
                 print(f"Hand persistence set to: {self.detector.max_persistence_frames} frames")
+            elif key == ord('c'):
+                # Capture and visualize current hand data
+                if collection_ready and primary_hand:
+                    self._capture_and_visualize_hand_data(frame, primary_hand)
+                else:
+                    print(f"✗ Cannot capture: {status_message}")
             elif key == ord('t'):
                 # Tune thresholds
                 print("Opening threshold tuning...")

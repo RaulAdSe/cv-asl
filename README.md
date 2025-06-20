@@ -67,6 +67,7 @@ python -m asl_cam.collect --show-mask
 # B - Toggle background removal
 # X - Toggle motion detection (filters out static torso)
 # P - Adjust hand persistence (how long to keep tracking still hands)
+# C - Capture and visualize current hand data (opens detailed analysis window)
 # R - Reset motion detection & tracker
 # T - Tune thresholds
 # Q - Quit
