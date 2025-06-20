@@ -20,16 +20,31 @@ from pathlib import Path
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
-import mediapipe as mp
+# MediaPipe import (optional for landmark-based training)
+try:
+    import mediapipe as mp
+    MEDIAPIPE_AVAILABLE = True
+except ImportError:
+    MEDIAPIPE_AVAILABLE = False
+    mp = None
 import torchvision.transforms as transforms
 from torchvision.models import mobilenet_v2
 import logging
 from typing import List, Tuple, Dict, Optional
 import time
+import datetime
+from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging with more detail
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - [%(name)s] - %(message)s',
+    datefmt='%H:%M:%S'
+)
 logger = logging.getLogger(__name__)
+
+# Removed complex TrainingMonitor class for simplicity
 
 class ASLDataset(Dataset):
     """Dataset class for ASL hand signs with support for multiple data formats"""
@@ -47,8 +62,10 @@ class ASLDataset(Dataset):
         self.transform = transform
         self.use_mediapipe = use_mediapipe
         
-        # Initialize MediaPipe if needed
+        # Initialize MediaPipe if needed and available
         if self.use_mediapipe:
+            if not MEDIAPIPE_AVAILABLE:
+                raise ImportError("MediaPipe not available. Install with: pip install mediapipe")
             self.mp_hands = mp.solutions.hands
             self.hands = self.mp_hands.Hands(
                 static_image_mode=True,
@@ -61,21 +78,51 @@ class ASLDataset(Dataset):
         self.classes = sorted(list(set([sample['label'] for sample in self.samples])))
         self.class_to_idx = {cls: idx for idx, cls in enumerate(self.classes)}
         
-        logger.info(f"Loaded {len(self.samples)} samples with {len(self.classes)} classes")
+        logger.info(f"📁 Dataset loaded: {len(self.samples):,} samples, {len(self.classes)} classes")
+        
+        # Print class distribution
+        class_counts = {}
+        for sample in self.samples:
+            class_counts[sample['label']] = class_counts.get(sample['label'], 0) + 1
+        
+        logger.info("📊 Class distribution:")
+        for cls, count in sorted(class_counts.items()):
+            logger.info(f"   {cls}: {count:,} samples")
     
     def _load_samples(self) -> List[Dict]:
-        """Load samples from Kaggle ASL dataset format"""
+        """Load samples from collected data or Kaggle dataset format"""
         samples = []
         
-        # Expect structure: data_dir/train_images/A/image1.jpg, etc.
-        for class_dir in self.data_dir.glob("*"):
-            if class_dir.is_dir() and class_dir.name != '.DS_Store':
-                class_name = class_dir.name
-                for img_path in class_dir.glob("*.jpg"):
-                    samples.append({
-                        'path': img_path,
-                        'label': class_name
-                    })
+        # Check if it's the collected data format (data/raw with hand_*.jpg files)
+        raw_images = list(self.data_dir.glob("hand_*.jpg"))
+        if raw_images:
+            logger.info("📁 Loading from collected hand detection data")
+            # For collected data, we'll need manual labeling or use filename patterns
+            # For now, create a single 'hand' class
+            for img_path in raw_images:
+                samples.append({
+                    'path': img_path,
+                    'label': 'hand'
+                })
+        else:
+            # Standard dataset format: class_dir/images
+            logger.info("📁 Loading from standard dataset format")
+            for class_dir in self.data_dir.glob("*"):
+                if class_dir.is_dir() and class_dir.name not in ['.DS_Store', '__pycache__']:
+                    class_name = class_dir.name
+                    for img_path in class_dir.glob("*.jpg"):
+                        samples.append({
+                            'path': img_path,
+                            'label': class_name
+                        })
+                    for img_path in class_dir.glob("*.png"):
+                        samples.append({
+                            'path': img_path,
+                            'label': class_name
+                        })
+        
+        if not samples:
+            raise ValueError(f"No samples found in {self.data_dir}. Collect data first with: python -m src.asl_cam.collect")
         
         return samples
     
@@ -123,7 +170,7 @@ class MobileNetV2ASL(nn.Module):
         super(MobileNetV2ASL, self).__init__()
         
         # MobileNetV2 backbone with adjustable width multiplier for speed
-        self.backbone = mobilenet_v2(pretrained=True, width_mult=width_mult)
+        self.backbone = mobilenet_v2(pretrained=False, width_mult=width_mult)
         
         # Remove final classifier
         self.feature_dim = self.backbone.classifier[1].in_features
@@ -167,7 +214,7 @@ class MobileNetV2Lite(nn.Module):
         super(MobileNetV2Lite, self).__init__()
         
         # Use width_mult=0.5 for 2x speedup
-        self.backbone = mobilenet_v2(pretrained=True, width_mult=0.5)
+        self.backbone = mobilenet_v2(pretrained=False, width_mult=0.5)
         
         # Get feature dimension
         self.feature_dim = self.backbone.classifier[1].in_features
@@ -207,14 +254,17 @@ class MediaPipeClassifier(nn.Module):
         return self.classifier(x)
 
 class ASLTrainer:
-    """Main training class for ASL models optimized for 30 FPS"""
+    """Main training class for ASL models with advanced monitoring"""
     
     def __init__(self, config: Dict):
         self.config = config
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        logger.info(f"Using device: {self.device}")
+        logger.info(f"🔧 Device: {self.device}")
         
-        # Optimized transforms for 30 FPS (smaller input size for speed)
+        # Setup TensorBoard
+        self.setup_tensorboard()
+        
+        # Optimized transforms for training
         input_size = config.get('input_size', 224)
         
         self.train_transforms = transforms.Compose([
@@ -235,6 +285,29 @@ class ASLTrainer:
             transforms.Normalize(mean=[0.485, 0.456, 0.406], 
                                std=[0.229, 0.224, 0.225])
         ])
+    
+    def setup_tensorboard(self):
+        """Setup TensorBoard logging"""
+        import datetime
+        log_dir = Path("logs") / f"asl_training_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        self.writer = SummaryWriter(log_dir)
+        logger.info(f"📊 TensorBoard logs: {log_dir}")
+        logger.info(f"   Run: tensorboard --logdir={log_dir}")
+    
+    def estimate_training_time(self, dataset_size: int, batch_size: int, num_epochs: int) -> str:
+        """Estimate total training time based on dataset size and hardware"""
+        # Rough estimates based on typical performance
+        samples_per_second = {
+            'cuda': 1000,  # With GPU
+            'cpu': 100     # CPU only
+        }
+        
+        sps = samples_per_second.get(self.device.type, 100)
+        seconds_per_epoch = dataset_size / sps
+        total_seconds = seconds_per_epoch * num_epochs
+        
+        return str(datetime.timedelta(seconds=int(total_seconds)))
     
     def create_model(self, model_type: str, num_classes: int) -> nn.Module:
         """Create model based on specified type"""
@@ -257,13 +330,166 @@ class ASLTrainer:
         
         return model.to(self.device)
     
+    def train(self, data_dir: str, model_type: str = "mobilenetv2") -> Dict:
+        """Enhanced training function with comprehensive monitoring"""
+        logger.info(f"🚀 Starting ASL training with {model_type}")
+        logger.info(f"💾 Data directory: {data_dir}")
+        
+        # Create datasets
+        use_mediapipe = (model_type == "mediapipe")
+        
+        full_dataset = ASLDataset(
+            data_dir=data_dir,
+            transform=self.train_transforms if not use_mediapipe else None,
+            use_mediapipe=use_mediapipe
+        )
+        
+        # Split dataset
+        train_size = int(0.8 * len(full_dataset))
+        val_size = len(full_dataset) - train_size
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            full_dataset, [train_size, val_size]
+        )
+        
+        logger.info(f"📊 Dataset split: {train_size:,} train, {val_size:,} validation")
+        
+        # Estimate training time
+        batch_size = self.config.get('batch_size', 64)
+        num_epochs = self.config.get('num_epochs', 25)
+        estimated_time = self.estimate_training_time(train_size, batch_size, num_epochs)
+        
+        logger.info(f"⏱️  Estimated training time: {estimated_time}")
+        
+        # Create data loaders
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=self.config.get('num_workers', 4),
+            pin_memory=True if self.device.type == 'cuda' else False
+        )
+        
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=self.config.get('num_workers', 4),
+            pin_memory=True if self.device.type == 'cuda' else False
+        )
+        
+        # Create model
+        num_classes = len(full_dataset.classes)
+        model = self.create_model(model_type, num_classes)
+        
+        # Count parameters
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        logger.info(f"🧠 Model parameters: {total_params:,} total, {trainable_params:,} trainable")
+        
+        # Initialize simple progress tracking
+        logger.info(f"📊 Training will process {train_size:,} samples in {train_size//batch_size} batches per epoch")
+        
+        # Loss and optimizer
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(
+            model.parameters(), 
+            lr=self.config.get('learning_rate', 0.001),
+            weight_decay=self.config.get('weight_decay', 1e-4)
+        )
+        
+        # Learning rate scheduler
+        scheduler = optim.lr_scheduler.StepLR(
+            optimizer, 
+            step_size=self.config.get('scheduler_step', 10), 
+            gamma=0.5
+        )
+        
+        # Start training
+        start_time = time.time()
+        best_accuracy = 0.0
+        training_history = {'train_loss': [], 'val_loss': [], 'val_accuracy': []}
+        
+        for epoch in range(num_epochs):
+            epoch_start = time.time()
+            logger.info(f"\n📈 Epoch {epoch+1}/{num_epochs}")
+            
+            # Train epoch
+            train_loss = self.train_epoch(model, train_loader, optimizer, criterion)
+            
+            # Validate
+            val_loss, val_accuracy = self.validate(model, val_loader, criterion)
+            
+            # Update scheduler
+            current_lr = optimizer.param_groups[0]['lr']
+            scheduler.step()
+            
+            # Log to TensorBoard
+            self.writer.add_scalar('Loss/Train', train_loss, epoch)
+            self.writer.add_scalar('Loss/Validation', val_loss, epoch)
+            self.writer.add_scalar('Accuracy/Validation', val_accuracy, epoch)
+            self.writer.add_scalar('Learning_Rate', current_lr, epoch)
+            
+            # Update history
+            training_history['train_loss'].append(train_loss)
+            training_history['val_loss'].append(val_loss)
+            training_history['val_accuracy'].append(val_accuracy)
+            
+            epoch_time = time.time() - epoch_start
+            logger.info(f"⏱️  Epoch time: {epoch_time:.1f}s | Train loss: {train_loss:.4f} | Val loss: {val_loss:.4f} | Val acc: {val_accuracy:.2f}%")
+            
+            # Save best model
+            if val_accuracy > best_accuracy:
+                best_accuracy = val_accuracy
+                
+                # Benchmark speed for final model
+                input_size = (3, self.config.get('input_size', 224), self.config.get('input_size', 224))
+                benchmark = self.benchmark_model(model, input_size)
+                
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'accuracy': val_accuracy,
+                    'classes': full_dataset.classes,
+                    'model_type': model_type,
+                    'config': self.config,
+                    'benchmark': benchmark,
+                    'total_params': total_params,
+                    'training_history': training_history
+                }, f'models/best_{model_type}_model.pth')
+                
+                logger.info(f"💾 New best model saved! Inference: {benchmark['fps']:.1f} FPS")
+        
+        # Training completed
+        total_time = time.time() - start_time
+        logger.info(f"\n🎉 Training completed in {total_time/60:.1f} minutes")
+        
+        # Close TensorBoard writer
+        self.writer.close()
+        
+        # Final benchmark
+        input_size = (3, self.config.get('input_size', 224), self.config.get('input_size', 224))
+        final_benchmark = self.benchmark_model(model, input_size)
+        
+        return {
+            'best_accuracy': best_accuracy,
+            'training_history': training_history,
+            'model_type': model_type,
+            'classes': full_dataset.classes,
+            'benchmark': final_benchmark,
+            'total_params': total_params
+        }
+    
     def train_epoch(self, model: nn.Module, dataloader: DataLoader, 
                    optimizer: optim.Optimizer, criterion: nn.Module) -> float:
         """Train for one epoch"""
         model.train()
         total_loss = 0.0
         
-        for batch_idx, (data, target) in enumerate(dataloader):
+        # Simple progress with tqdm
+        pbar = tqdm(dataloader, desc="Training")
+        
+        for batch_idx, (data, target) in enumerate(pbar):
             data, target = data.to(self.device), target.to(self.device)
             
             optimizer.zero_grad()
@@ -274,8 +500,11 @@ class ASLTrainer:
             
             total_loss += loss.item()
             
-            if batch_idx % 50 == 0:
-                logger.info(f'Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f}')
+            # Update progress bar
+            pbar.set_postfix({
+                'Loss': f'{loss.item():.4f}',
+                'Avg': f'{total_loss/(batch_idx+1):.4f}'
+            })
         
         return total_loss / len(dataloader)
     
@@ -335,142 +564,6 @@ class ASLTrainer:
             'fps': fps,
             'times': times
         }
-    
-    def train(self, data_dir: str, model_type: str = "mobilenetv2") -> Dict:
-        """Main training function"""
-        logger.info(f"Starting training with model type: {model_type}")
-        logger.info(f"Target: 30 FPS real-time performance")
-        
-        # Create datasets
-        use_mediapipe = (model_type == "mediapipe")
-        
-        full_dataset = ASLDataset(
-            data_dir=data_dir,
-            transform=self.train_transforms if not use_mediapipe else None,
-            use_mediapipe=use_mediapipe
-        )
-        
-        # Split dataset
-        train_size = int(0.8 * len(full_dataset))
-        val_size = len(full_dataset) - train_size
-        train_dataset, val_dataset = torch.utils.data.random_split(
-            full_dataset, [train_size, val_size]
-        )
-        
-        # Create data loaders with optimized settings for speed
-        train_loader = DataLoader(
-            train_dataset, 
-            batch_size=self.config.get('batch_size', 64),  # Larger batch for efficiency
-            shuffle=True,
-            num_workers=self.config.get('num_workers', 4),
-            pin_memory=True if self.device.type == 'cuda' else False
-        )
-        
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=self.config.get('batch_size', 64),
-            shuffle=False,
-            num_workers=self.config.get('num_workers', 4),
-            pin_memory=True if self.device.type == 'cuda' else False
-        )
-        
-        # Create model
-        num_classes = len(full_dataset.classes)
-        model = self.create_model(model_type, num_classes)
-        
-        # Count parameters
-        total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        logger.info(f"Total parameters: {total_params:,}")
-        logger.info(f"Trainable parameters: {trainable_params:,}")
-        
-        # Loss and optimizer
-        criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(
-            model.parameters(), 
-            lr=self.config.get('learning_rate', 0.001),
-            weight_decay=self.config.get('weight_decay', 1e-4)
-        )
-        
-        # Learning rate scheduler
-        scheduler = optim.lr_scheduler.StepLR(
-            optimizer, 
-            step_size=self.config.get('scheduler_step', 10), 
-            gamma=0.5
-        )
-        
-        # Training loop
-        best_accuracy = 0.0
-        training_history = {
-            'train_loss': [],
-            'val_loss': [],
-            'val_accuracy': []
-        }
-        
-        num_epochs = self.config.get('num_epochs', 25)
-        
-        for epoch in range(num_epochs):
-            start_time = time.time()
-            
-            # Train
-            train_loss = self.train_epoch(model, train_loader, optimizer, criterion)
-            
-            # Validate
-            val_loss, val_accuracy = self.validate(model, val_loader, criterion)
-            
-            # Update scheduler
-            scheduler.step()
-            
-            # Save history
-            training_history['train_loss'].append(train_loss)
-            training_history['val_loss'].append(val_loss)
-            training_history['val_accuracy'].append(val_accuracy)
-            
-            epoch_time = time.time() - start_time
-            
-            logger.info(
-                f'Epoch {epoch+1}/{num_epochs} ({epoch_time:.1f}s) - '
-                f'Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, '
-                f'Val Acc: {val_accuracy:.2f}%'
-            )
-            
-            # Save best model
-            if val_accuracy > best_accuracy:
-                best_accuracy = val_accuracy
-                
-                # Benchmark speed
-                input_size = (3, self.config.get('input_size', 224), self.config.get('input_size', 224))
-                benchmark = self.benchmark_model(model, input_size)
-                
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'accuracy': val_accuracy,
-                    'classes': full_dataset.classes,
-                    'model_type': model_type,
-                    'config': self.config,
-                    'benchmark': benchmark,
-                    'total_params': total_params
-                }, f'models/best_{model_type}_model.pth')
-                
-                logger.info(f'New best model saved!')
-                logger.info(f'Accuracy: {val_accuracy:.2f}%')
-                logger.info(f'Inference speed: {benchmark["fps"]:.1f} FPS')
-                logger.info(f'Inference time: {benchmark["avg_inference_time_ms"]:.1f}ms')
-        
-        # Final benchmark
-        input_size = (3, self.config.get('input_size', 224), self.config.get('input_size', 224))
-        final_benchmark = self.benchmark_model(model, input_size)
-        
-        return {
-            'best_accuracy': best_accuracy,
-            'training_history': training_history,
-            'model_type': model_type,
-            'classes': full_dataset.classes,
-            'benchmark': final_benchmark,
-            'total_params': total_params
-        }
 
 def compare_models(data_dir: str, config: Dict) -> Dict:
     """Compare different model architectures optimized for 30 FPS"""
@@ -519,45 +612,62 @@ def compare_models(data_dir: str, config: Dict) -> Dict:
     
     return results
 
-if __name__ == "__main__":
-    # Optimized configuration for 30 FPS target
+def train_quick_demo():
+    """Quick training demo with sample data from collected images"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="ASL Model Training")
+    parser.add_argument("--data", default="data/raw", help="Data directory")
+    parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
+    parser.add_argument("--model", default="mobilenetv2", choices=["mobilenetv2", "mobilenetv2_lite"])
+    parser.add_argument("--dry-run", action="store_true", help="Show estimates only")
+    
+    args = parser.parse_args()
+    
+    # Simple configuration
     config = {
-        'batch_size': 64,           # Larger batch for efficiency
-        'learning_rate': 0.002,     # Slightly higher LR for faster convergence
-        'num_epochs': 25,           # Reasonable number for good results
+        'batch_size': 32,
+        'learning_rate': 0.001,
+        'num_epochs': args.epochs,
         'weight_decay': 1e-4,
-        'scheduler_step': 8,
-        'input_size': 224,          # Standard size, can be reduced for speed
-        'width_mult': 1.0,          # Full width for accuracy
-        'num_workers': 4            # Parallel data loading
+        'scheduler_step': 5,
+        'input_size': 224 if args.model == "mobilenetv2" else 192,
+        'num_workers': 2
     }
     
-    # Path to your ASL dataset
-    data_dir = "data/raw/asl_dataset/unified/train_images"
+    logger.info(f"🚀 ASL Training - {args.model}")
+    logger.info(f"Data: {args.data}")
+    logger.info(f"Epochs: {args.epochs}")
     
-    # Create models directory
+    if args.dry_run:
+        logger.info("📊 Dry run mode - showing estimates")
+        data_path = Path(args.data)
+        if data_path.exists():
+            logger.info(f"✅ Data directory found: {data_path}")
+        else:
+            logger.info(f"❌ Data directory not found: {data_path}")
+            logger.info("📝 Collect some data first using:")
+            logger.info("   python -m src.asl_cam.collect")
+        return
+    
+    # Create directories
     os.makedirs("models", exist_ok=True)
+    os.makedirs("logs", exist_ok=True)
     
-    # Compare different models optimized for 30 FPS
-    logger.info("Starting ASL model training - Target: 30 FPS real-time")
-    results = compare_models(data_dir, config)
+    # Start training
+    trainer = ASLTrainer(config)
     
-    # Print final comparison
-    logger.info("\n" + "="*80)
-    logger.info("FINAL RESULTS COMPARISON - 30 FPS TARGET")
-    logger.info("="*80)
-    
-    for model_type, result in results.items():
-        fps = result['benchmark']['fps']
-        accuracy = result['best_accuracy']
-        params = result['total_params']
-        status = "✅ MEETS TARGET" if fps >= 30 else "⚠️  BELOW TARGET"
+    try:
+        results = trainer.train(args.data, args.model)
+        logger.info(f"🎉 Training completed!")
+        logger.info(f"📈 Best accuracy: {results['best_accuracy']:.2f}%")
+        logger.info(f"🚀 Inference speed: {results['benchmark']['fps']:.1f} FPS")
+        logger.info(f"💾 Model saved to: models/best_{args.model}_model.pth")
         
-        logger.info(f"{model_type:20} - Acc: {accuracy:6.2f}% | FPS: {fps:6.1f} | Params: {params:8,} | {status}")
-    
-    # Save results
-    with open('model_comparison_30fps.json', 'w') as f:
-        json.dump(results, f, indent=2)
-    
-    logger.info(f"\nResults saved to 'model_comparison_30fps.json'")
-    logger.info("Ready for 30 FPS real-time ASL recognition! 🚀")
+    except KeyboardInterrupt:
+        logger.info("Training interrupted by user")
+    except Exception as e:
+        logger.error(f"Training failed: {e}")
+
+if __name__ == "__main__":
+    train_quick_demo()
