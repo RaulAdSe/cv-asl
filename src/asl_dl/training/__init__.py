@@ -1,7 +1,5 @@
-"""
-Training module for ASL models
-"""
+"""ASL DL Training Submodule."""
 
-from .trainer import ASLTrainer
- 
+from .train import ASLTrainer
+
 __all__ = ['ASLTrainer'] 

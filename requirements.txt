@@ -26,3 +26,4 @@ kagglehub>=0.3.0
 
 # Visualization and plotting
 plotly>=5.14.0
+pytest>=8.0.0

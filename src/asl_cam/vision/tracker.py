@@ -1,312 +1,133 @@
 """
-Hand tracking using Kalman filters and centroid-based matching.
-"""
-import cv2
-import numpy as np
-from typing import List, Tuple, Optional, Dict
-from dataclasses import dataclass
+Hand Tracker with Kalman Filter
 
-@dataclass
-class TrackedHand:
-    """Container for tracked hand information."""
-    id: int
-    bbox: Tuple[int, int, int, int]  # (x, y, w, h)
-    center: Tuple[float, float]      # (cx, cy)
-    age: int                         # Frames since first detection
-    hits: int                        # Total number of detections
-    time_since_update: int           # Frames since last update
-    
+This module provides a Kalman Filter-based tracker to predict and smooth
+the bounding box of a detected hand across frames. This helps to reduce
+jitter and maintain a stable detection even if the detector misses a frame.
+"""
+import numpy as np
+import logging
+import cv2
+from typing import Tuple, Optional
+
+logger = logging.getLogger(__name__)
+
 class HandTracker:
-    """Single-hand tracker using Kalman filter."""
-    
-    def __init__(self, max_disappeared: int = 15):  # Reduced for faster cleanup
+    """
+    A Kalman Filter-based tracker for smoothing a single hand's bounding box.
+    """
+    def __init__(self, process_noise: float = 0.03, measurement_noise: float = 0.1, error_cov: float = 0.1, max_missed_frames: int = 10):
         """
-        Initialize hand tracker.
+        Initializes the hand tracker.
         
         Args:
-            max_disappeared: Maximum frames to keep track without detection
+            process_noise: How much we trust the physical model (lower = smoother).
+            measurement_noise: How much we trust the measurement (lower = less lag).
+            error_cov: Initial estimate of the error.
+            max_missed_frames: Maximum frames to "coast" before resetting.
         """
-        self.max_disappeared = max_disappeared
-        self.next_id = 0
-        self.tracked_hands: Dict[int, TrackedHand] = {}
-        self.kalman_filters: Dict[int, cv2.KalmanFilter] = {}
+        self.kalman = cv2.KalmanFilter(4, 2)
+        # State: [x, y, dx, dy] (center x, center y, velocity x, velocity y)
+        # Measurement: [x, y] (center x, center y)
+        self.kalman.transitionMatrix = np.array([[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32)
+        self.kalman.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], np.float32)
         
-        # Optimized distance threshold for better matching
-        self.distance_threshold = 80  # Reduced for tighter matching
-        
-    def _create_kalman_filter(self) -> cv2.KalmanFilter:
-        """Create a Kalman filter for tracking hand position."""
-        # State: [x, y, vx, vy] (position and velocity)
-        kf = cv2.KalmanFilter(4, 2)
-        
-        # Transition matrix (constant velocity model)
-        kf.transitionMatrix = np.array([
-            [1, 0, 1, 0],
-            [0, 1, 0, 1],
-            [0, 0, 1, 0],
-            [0, 0, 0, 1]
-        ], dtype=np.float32)
-        
-        # Measurement matrix (we observe position only)
-        kf.measurementMatrix = np.array([
-            [1, 0, 0, 0],
-            [0, 1, 0, 0]
-        ], dtype=np.float32)
-        
-        # Optimized process noise covariance (lower values for smoother tracking)
-        kf.processNoiseCov = np.eye(4, dtype=np.float32) * 0.05
-        
-        # Optimized measurement noise covariance (higher confidence in measurements)
-        kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 0.05
-        
-        # Error covariance
-        kf.errorCovPost = np.eye(4, dtype=np.float32) * 0.1
-        
-        return kf
-    
-    def _bbox_center(self, bbox: Tuple[int, int, int, int]) -> Tuple[float, float]:
-        """Calculate center point of bounding box."""
-        x, y, w, h = bbox
-        return (x + w / 2.0, y + h / 2.0)
-    
-    def _distance(self, p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
-        """Calculate Euclidean distance between two points."""
-        return np.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
-    
-    def update(self, detections: List[Tuple[int, int, int, int]]) -> List[TrackedHand]:
+        # Noise Covariances
+        self.kalman.processNoiseCov = np.eye(4, dtype=np.float32) * process_noise
+        self.kalman.measurementNoiseCov = np.eye(2, dtype=np.float32) * measurement_noise
+        self.kalman.errorCovPost = np.eye(4, dtype=np.float32) * error_cov
+
+        self.initialized = False
+        self.last_bbox: Optional[Tuple[int, int, int, int]] = None
+        self.missed_frames = 0
+        self.max_missed_frames = max_missed_frames
+
+        logger.info("HandTracker (Kalman Filter) initialized.")
+
+    def _get_center(self, bbox: Tuple[int, int, int, int]) -> Tuple[float, float]:
+        """Calculates the center of a bounding box."""
+        return bbox[0] + bbox[2] / 2, bbox[1] + bbox[3] / 2
+
+    def initialize(self, bbox: Tuple[int, int, int, int]):
         """
-        Update tracker with new detections.
+        Initializes the filter with the first detected bounding box.
         
         Args:
-            detections: List of (x, y, w, h) bounding boxes
-            
+            bbox: The first bounding box (x, y, w, h).
+        """
+        center_x, center_y = self._get_center(bbox)
+        
+        self.kalman.statePost = np.array([center_x, center_y, 0, 0], dtype=np.float32)
+        self.last_bbox = bbox
+        self.initialized = True
+        self.missed_frames = 0
+        logger.info(f"HandTracker initialized at position: ({center_x:.2f}, {center_y:.2f})")
+
+    def predict(self) -> Optional[Tuple[int, int, int, int]]:
+        """
+        Predicts the next position of the hand.
+        
         Returns:
-            List of currently tracked hands
+            The predicted bounding box (x, y, w, h) if tracking, otherwise None.
         """
-        # If no existing tracks, create new ones
-        if len(self.tracked_hands) == 0:
-            for detection in detections:
-                self._register_hand(detection)
-        else:
-            # Predict next positions
-            predictions = {}
-            for hand_id, kf in self.kalman_filters.items():
-                pred = kf.predict()
-                predictions[hand_id] = (float(pred[0]), float(pred[1]))
-            
-            # Match detections to existing tracks
-            if len(detections) > 0:
-                self._match_detections(detections, predictions)
-            
-            # Update time since last update for all tracks
-            for hand in self.tracked_hands.values():
-                hand.time_since_update += 1
-                hand.age += 1
+        if not self.initialized:
+            return None
+
+        prediction = self.kalman.predict().flatten()
+        self.missed_frames += 1
         
-        # Remove old tracks
-        self._cleanup_old_tracks()
-        
-        return list(self.tracked_hands.values())
-    
-    def _register_hand(self, bbox: Tuple[int, int, int, int]) -> None:
-        """Register a new hand track."""
-        hand_id = self.next_id
-        self.next_id += 1
-        
-        center = self._bbox_center(bbox)
-        
-        # Create tracked hand
-        hand = TrackedHand(
-            id=hand_id,
-            bbox=bbox,
-            center=center,
-            age=0,
-            hits=1,
-            time_since_update=0
-        )
-        
-        self.tracked_hands[hand_id] = hand
-        
-        # Create Kalman filter
-        kf = self._create_kalman_filter()
-        
-        # Initialize state with current position and zero velocity
-        kf.statePre = np.array([center[0], center[1], 0, 0], dtype=np.float32)
-        kf.statePost = np.array([center[0], center[1], 0, 0], dtype=np.float32)
-        
-        self.kalman_filters[hand_id] = kf
-    
-    def _match_detections(self, detections: List[Tuple[int, int, int, int]], 
-                         predictions: Dict[int, Tuple[float, float]]) -> None:
-        """Match detections to existing tracks using improved distance matching."""
-        if len(detections) == 0:
-            return
-        
-        detection_centers = [self._bbox_center(det) for det in detections]
-        
-        # Find best matches with improved algorithm
-        matched_detections = set()
-        matched_tracks = set()
-        
-        # Create distance matrix for better matching
-        distances = {}
-        for hand_id, pred_center in predictions.items():
-            if hand_id not in self.tracked_hands:
-                continue
-                
-            for i, det_center in enumerate(detection_centers):
-                if i in matched_detections:
-                    continue
-                    
-                distance = self._distance(pred_center, det_center)
-                if distance < self.distance_threshold:
-                    distances[(hand_id, i)] = distance
-        
-        # Sort by distance and assign best matches
-        sorted_distances = sorted(distances.items(), key=lambda x: x[1])
-        
-        for (hand_id, det_idx), distance in sorted_distances:
-            if hand_id not in matched_tracks and det_idx not in matched_detections:
-                self._update_track(hand_id, detections[det_idx])
-                matched_detections.add(det_idx)
-                matched_tracks.add(hand_id)
-        
-        # Create new tracks for unmatched detections
-        for i, detection in enumerate(detections):
-            if i not in matched_detections:
-                self._register_hand(detection)
-    
-    def _update_track(self, hand_id: int, bbox: Tuple[int, int, int, int]) -> None:
-        """Update existing track with new detection."""
-        if hand_id not in self.tracked_hands:
-            return
-        
-        center = self._bbox_center(bbox)
-        
-        # Update Kalman filter
-        measurement = np.array([[center[0]], [center[1]]], dtype=np.float32)
-        self.kalman_filters[hand_id].correct(measurement)
-        
-        # Update tracked hand
-        hand = self.tracked_hands[hand_id]
-        hand.bbox = bbox
-        hand.center = center
-        hand.hits += 1
-        hand.time_since_update = 0  # Reset time since update
-    
-    def _cleanup_old_tracks(self) -> None:
-        """Remove tracks that haven't been updated for too long."""
-        to_remove = []
-        
-        for hand_id, hand in self.tracked_hands.items():
-            if hand.time_since_update > self.max_disappeared:
-                to_remove.append(hand_id)
-        
-        for hand_id in to_remove:
-            del self.tracked_hands[hand_id]
-            del self.kalman_filters[hand_id]
-    
-    def get_primary_hand(self) -> Optional[TrackedHand]:
-        """Get the most reliable tracked hand (best stability score)."""
-        if not self.tracked_hands:
+        if self.missed_frames > self.max_missed_frames:
+            self.reset()
             return None
         
-        # Calculate stability score: hits per age ratio, but require minimum hits
-        best_hand = None
-        best_score = 0
+        center_x, center_y = prediction[0], prediction[1]
         
-        for hand in self.tracked_hands.values():
-            if hand.hits >= 3:  # Require minimum stability
-                # Score based on hits/age ratio and recent updates
-                age_factor = max(hand.age, 1)  # Avoid division by zero
-                recency_factor = 1.0 / (hand.time_since_update + 1)  # Recent updates are better
-                stability_score = (hand.hits / age_factor) * recency_factor
-                
-                if stability_score > best_score:
-                    best_score = stability_score
-                    best_hand = hand
-        
-        return best_hand
-    
-    def draw_tracks(self, img: np.ndarray) -> np.ndarray:
+        if self.last_bbox:
+            w, h = self.last_bbox[2], self.last_bbox[3]
+            predicted_bbox = (int(center_x - w / 2), int(center_y - h / 2), w, h)
+            self.last_bbox = predicted_bbox # Keep track of the predicted state
+            return predicted_bbox
+        return None
+
+    def update(self, bbox: Tuple[int, int, int, int]) -> Tuple[int, int, int, int]:
         """
-        Draw tracked hands on image with enhanced visualization.
+        Updates the filter with a new measurement (a detected bounding box).
         
         Args:
-            img: Input image
+            bbox: The new bounding box (x, y, w, h).
             
         Returns:
-            Image with tracking visualizations
+            The corrected (smoothed) bounding box (x, y, w, h).
         """
-        result = img.copy()
+        if not self.initialized:
+            self.initialize(bbox)
+            return bbox # On the first update, return the bbox itself.
         
-        for hand in self.tracked_hands.values():
-            x, y, w, h = hand.bbox
-            
-            # Choose color and thickness based on track stability
-            if hand.hits >= 10:
-                color = (0, 255, 0)  # Green for very stable tracks
-                thickness = 3
-            elif hand.hits >= 5:
-                color = (0, 255, 255)  # Yellow for stable tracks
-                thickness = 2
-            else:
-                color = (0, 0, 255)  # Red for new/unstable tracks
-                thickness = 2
-            
-            # Draw bounding box
-            cv2.rectangle(result, (x, y), (x + w, y + h), color, thickness)
-            
-            # Draw center point with tracking trail effect
-            center_int = (int(hand.center[0]), int(hand.center[1]))
-            cv2.circle(result, center_int, 4, color, -1)
-            cv2.circle(result, center_int, 8, color, 1)
-            
-            # Add comprehensive track info
-            stability_score = hand.hits / max(hand.age, 1)
-            info_text = f"ID:{hand.id} H:{hand.hits} S:{stability_score:.2f}"
-            
-            # Add text background for better readability
-            text_size = cv2.getTextSize(info_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
-            cv2.rectangle(result, (x, y - 20), (x + text_size[0] + 5, y), color, -1)
-            cv2.putText(result, info_text, (x + 2, y - 5), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
-        
-        return result
+        center_x, center_y = self._get_center(bbox)
+        measurement = np.array([center_x, center_y], dtype=np.float32)
 
-class MultiHandTracker:
-    """Multi-hand tracker using multiple Kalman filters."""
-    
-    def __init__(self, max_hands: int = 2, max_disappeared: int = 15):
-        """
-        Initialize multi-hand tracker.
+        self.kalman.correct(measurement)
+        self.missed_frames = 0
         
-        Args:
-            max_hands: Maximum number of hands to track
-            max_disappeared: Maximum frames to keep track without detection
-        """
-        self.max_hands = max_hands
-        self.tracker = HandTracker(max_disappeared)
-    
-    def update(self, detections: List[Tuple[int, int, int, int]]) -> List[TrackedHand]:
-        """Update tracker with new detections."""
-        # Limit detections to max_hands (take largest ones first)
-        if len(detections) > self.max_hands:
-            # Sort by area and take the largest ones
-            detection_areas = [(det, (det[2] * det[3])) for det in detections]
-            detection_areas.sort(key=lambda x: x[1], reverse=True)
-            detections = [det for det, _ in detection_areas[:self.max_hands]]
+        corrected_state = self.kalman.statePost.flatten()
+        smooth_center_x, smooth_center_y = corrected_state[0], corrected_state[1]
+
+        # Exponential moving average for smoothing the size
+        last_w, last_h = self.last_bbox[2:]
+        new_w, new_h = bbox[2:]
+        smooth_w = int(last_w * 0.7 + new_w * 0.3)
+        smooth_h = int(last_h * 0.7 + new_h * 0.3)
         
-        return self.tracker.update(detections)
-    
-    def get_hands(self) -> List[TrackedHand]:
-        """Get all currently tracked hands."""
-        return list(self.tracker.tracked_hands.values())
-    
-    def get_primary_hand(self) -> Optional[TrackedHand]:
-        """Get the most stable tracked hand."""
-        return self.tracker.get_primary_hand()
-    
-    def draw_tracks(self, img: np.ndarray) -> np.ndarray:
-        """Draw all tracked hands."""
-        return self.tracker.draw_tracks(img) 
+        smooth_bbox = (int(smooth_center_x - smooth_w / 2), 
+                       int(smooth_center_y - smooth_h / 2),
+                       smooth_w, smooth_h)
+        
+        self.last_bbox = smooth_bbox
+        return smooth_bbox
+        
+    def reset(self):
+        """Resets the tracker to an uninitialized state."""
+        self.initialized = False
+        self.last_bbox = None
+        self.missed_frames = 0
+        logger.info("HandTracker has been reset.") 
