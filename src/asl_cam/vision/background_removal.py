@@ -1,445 +1,394 @@
 """
-Background removal and hand isolation for detected hand regions.
+Simple and effective background removal for detected hand regions.
 
-This module provides various techniques to remove background clutter
-and isolate hand regions for cleaner machine learning training data.
+This module uses a straightforward approach: since hand detection is already working well,
+the cropped region is mostly hand/arm. We can use color analysis to remove background
+pixels that don't match the dominant skin tones.
 """
 import cv2
 import numpy as np
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional
 from enum import Enum
 
-class BackgroundMethod(Enum):
-    """Available background removal methods."""
-    GRABCUT = "grabcut"           # GrabCut algorithm (best quality)
-    CONTOUR_MASK = "contour"      # Use hand contour as mask
-    SKIN_MASK = "skin"            # Use skin detection mask
-    MOG2 = "mog2"                 # Background subtractor
-    WATERSHED = "watershed"       # Watershed segmentation
+class SimpleBackgroundMethod(Enum):
+    """Simple background removal methods."""
+    DOMINANT_COLOR = "dominant"      # Use dominant colors in crop (fastest, most reliable)
+    ADAPTIVE_SKIN = "adaptive"       # Adaptive skin detection based on crop
+    EDGE_COLOR = "edge"              # Color-based with edge refinement
 
-class BackgroundRemover:
-    """Background removal and hand isolation system."""
+class SimpleBackgroundRemover:
+    """
+    Simple, effective background removal system.
     
-    def __init__(self, method: BackgroundMethod = BackgroundMethod.GRABCUT):
+    Philosophy: Trust the hand detection - the crop is mostly hand/arm.
+    Remove pixels that don't match the dominant skin colors.
+    """
+    
+    def __init__(self, method: SimpleBackgroundMethod = SimpleBackgroundMethod.DOMINANT_COLOR):
         """
-        Initialize background remover.
+        Initialize simple background remover.
         
         Args:
             method: Background removal method to use
         """
         self.method = method
         
-        # Initialize method-specific components
-        if method == BackgroundMethod.MOG2:
-            self.bg_subtractor = cv2.createBackgroundSubtractorMOG2(
-                detectShadows=False,
-                varThreshold=50,
-                history=500
-            )
+        # Simple parameters
+        self.color_tolerance = 40        # How strict color matching is (lower = stricter)
+        self.edge_blur = 3              # Edge smoothing
+        self.noise_removal = True       # Remove small noise spots
         
-        # GrabCut parameters
-        self.grabcut_iterations = 5
-        self.grabcut_margin = 10  # Pixels around hand bbox for probable foreground
+        # Morphological kernel for cleaning
+        self.cleanup_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    
+    def remove_background_simple(self, hand_crop: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Simple background removal from hand crop.
         
-        # Morphological operations kernel
-        self.morph_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        Args:
+            hand_crop: Cropped hand image (already detected as hand)
+            
+        Returns:
+            Tuple of (clean_hand_image, mask)
+        """
+        if hand_crop.size == 0 or len(hand_crop.shape) != 3:
+            # Return black image if invalid input
+            h, w = hand_crop.shape[:2] if hand_crop.size > 0 else (100, 100)
+            return np.zeros((h, w, 3), dtype=np.uint8), np.zeros((h, w), dtype=np.uint8)
+        
+        if self.method == SimpleBackgroundMethod.DOMINANT_COLOR:
+            return self._dominant_color_removal(hand_crop)
+        elif self.method == SimpleBackgroundMethod.ADAPTIVE_SKIN:
+            return self._adaptive_skin_removal(hand_crop)
+        elif self.method == SimpleBackgroundMethod.EDGE_COLOR:
+            return self._edge_color_removal(hand_crop)
+        else:
+            return self._dominant_color_removal(hand_crop)  # Default fallback
+    
+    def _dominant_color_removal(self, hand_crop: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Remove background using dominant color analysis.
+        
+        Strategy:
+        1. Find the dominant colors in the center region (likely hand)
+        2. Keep pixels that match these colors within tolerance
+        3. Remove everything else as background
+        """
+        h, w = hand_crop.shape[:2]
+        
+        # Analyze center region to get dominant hand colors
+        center_region = self._get_center_region(hand_crop)
+        hand_colors = self._get_dominant_colors(center_region, num_colors=3)
+        
+        # Create mask for pixels matching hand colors
+        mask = self._create_color_mask(hand_crop, hand_colors, self.color_tolerance)
+        
+        # Clean up the mask
+        if self.noise_removal:
+            mask = self._clean_mask(mask)
+        
+        # Apply mask with soft edges
+        result = self._apply_mask_with_soft_edges(hand_crop, mask)
+        
+        return result, mask
+    
+    def _adaptive_skin_removal(self, hand_crop: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Adaptive skin detection based on the specific crop.
+        
+        Strategy:
+        1. Sample skin colors from the crop itself
+        2. Create adaptive HSV ranges based on these samples
+        3. Apply skin detection with crop-specific parameters
+        """
+        h, w = hand_crop.shape[:2]
+        
+        # Convert to HSV for better skin detection
+        hsv = cv2.cvtColor(hand_crop, cv2.COLOR_BGR2HSV)
+        
+        # Sample multiple regions to get skin color range
+        skin_samples = self._sample_skin_colors(hand_crop)
+        
+        if len(skin_samples) == 0:
+            # Fallback to dominant color method
+            return self._dominant_color_removal(hand_crop)
+        
+        # Create adaptive HSV ranges
+        hsv_ranges = self._create_adaptive_hsv_ranges(skin_samples)
+        
+        # Apply skin detection
+        mask = np.zeros((h, w), dtype=np.uint8)
+        for hsv_range in hsv_ranges:
+            range_mask = cv2.inRange(hsv, hsv_range['lower'], hsv_range['upper'])
+            mask = cv2.bitwise_or(mask, range_mask)
+        
+        # Clean up mask
+        if self.noise_removal:
+            mask = self._clean_mask(mask)
+        
+        # Apply mask
+        result = self._apply_mask_with_soft_edges(hand_crop, mask)
+        
+        return result, mask
+    
+    def _edge_color_removal(self, hand_crop: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Color-based removal with edge refinement.
+        
+        Strategy:
+        1. Use dominant color method as base
+        2. Refine edges using gradient information
+        3. Smooth transitions for natural look
+        """
+        # Start with dominant color method
+        base_result, base_mask = self._dominant_color_removal(hand_crop)
+        
+        # Find edges in the original image
+        gray = cv2.cvtColor(hand_crop, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 50, 150)
+        
+        # Dilate edges slightly to create transition zones
+        edge_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        edges_dilated = cv2.dilate(edges, edge_kernel, iterations=1)
+        
+        # Create refined mask that respects edges
+        refined_mask = base_mask.copy()
+        
+        # In edge regions, be more conservative (keep more pixels)
+        edge_regions = edges_dilated > 0
+        refined_mask[edge_regions] = cv2.bitwise_or(
+            refined_mask[edge_regions], 
+            (base_mask[edge_regions] > 127).astype(np.uint8) * 255
+        )
+        
+        # Apply with extra smoothing
+        result = self._apply_mask_with_soft_edges(hand_crop, refined_mask, extra_blur=True)
+        
+        return result, refined_mask
+    
+    def _get_center_region(self, image: np.ndarray, center_ratio: float = 0.6) -> np.ndarray:
+        """Extract center region of image (likely to be hand)."""
+        h, w = image.shape[:2]
+        
+        center_h = int(h * center_ratio)
+        center_w = int(w * center_ratio)
+        
+        start_y = (h - center_h) // 2
+        start_x = (w - center_w) // 2
+        
+        return image[start_y:start_y + center_h, start_x:start_x + center_w]
+    
+    def _get_dominant_colors(self, image: np.ndarray, num_colors: int = 3) -> np.ndarray:
+        """
+        Get dominant colors using K-means clustering.
+        
+        Returns:
+            Array of dominant colors in BGR format
+        """
+        # Reshape image to list of pixels
+        pixels = image.reshape(-1, 3).astype(np.float32)
+        
+        # Apply K-means to find dominant colors
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
+        _, labels, centers = cv2.kmeans(pixels, num_colors, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+        
+        # Return centers as uint8
+        return centers.astype(np.uint8)
+    
+    def _create_color_mask(self, image: np.ndarray, target_colors: np.ndarray, tolerance: int) -> np.ndarray:
+        """
+        Create mask for pixels matching target colors within tolerance.
+        """
+        h, w = image.shape[:2]
+        mask = np.zeros((h, w), dtype=np.uint8)
+        
+        for color in target_colors:
+            # Create range around each target color
+            lower = np.maximum(color - tolerance, 0)
+            upper = np.minimum(color + tolerance, 255)
+            
+            # Create mask for this color range
+            color_mask = cv2.inRange(image, lower, upper)
+            
+            # Add to overall mask
+            mask = cv2.bitwise_or(mask, color_mask)
+        
+        return mask
+    
+    def _sample_skin_colors(self, image: np.ndarray) -> list:
+        """
+        Sample skin colors from multiple regions of the image.
+        """
+        h, w = image.shape[:2]
+        samples = []
+        
+        # Sample from multiple small regions
+        sample_regions = [
+            (h//4, w//4, h//2, w//2),     # Center
+            (h//3, w//3, h//3, w//3),     # Upper center
+            (2*h//3, w//3, h//3, w//3),   # Lower center
+            (h//3, w//6, h//3, w//3),     # Left center
+            (h//3, 2*w//3, h//3, w//6),   # Right center
+        ]
+        
+        for y, x, sh, sw in sample_regions:
+            if y + sh < h and x + sw < w:
+                region = image[y:y+sh, x:x+sw]
+                if region.size > 0:
+                    # Get median color from this region
+                    median_color = np.median(region.reshape(-1, 3), axis=0)
+                    samples.append(median_color.astype(np.uint8))
+        
+        return samples
+    
+    def _create_adaptive_hsv_ranges(self, skin_samples: list) -> list:
+        """
+        Create HSV ranges based on skin samples.
+        """
+        hsv_ranges = []
+        
+        for sample in skin_samples:
+            # Convert BGR sample to HSV
+            sample_bgr = np.uint8([[sample]])
+            sample_hsv = cv2.cvtColor(sample_bgr, cv2.COLOR_BGR2HSV)[0][0]
+            
+            # Create range around this HSV value
+            h, s, v = sample_hsv
+            
+            # Adaptive ranges based on the actual skin color
+            h_range = 15 if h > 20 else 10  # Smaller range for typical skin hues
+            s_range = 50
+            v_range = 60
+            
+            lower_hsv = np.array([max(0, h - h_range), max(0, s - s_range), max(0, v - v_range)])
+            upper_hsv = np.array([min(179, h + h_range), min(255, s + s_range), min(255, v + v_range)])
+            
+            hsv_ranges.append({'lower': lower_hsv, 'upper': upper_hsv})
+        
+        return hsv_ranges
+    
+    def _clean_mask(self, mask: np.ndarray) -> np.ndarray:
+        """
+        Clean up mask by removing noise and filling holes.
+        """
+        # Remove small noise
+        cleaned = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.cleanup_kernel)
+        
+        # Fill small holes
+        cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, self.cleanup_kernel)
+        
+        # Keep only the largest connected component
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(cleaned, connectivity=8)
+        
+        if num_labels > 1:
+            # Find largest component (excluding background)
+            largest_component = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+            cleaned = (labels == largest_component).astype(np.uint8) * 255
+        
+        return cleaned
+    
+    def _apply_mask_with_soft_edges(self, image: np.ndarray, mask: np.ndarray, extra_blur: bool = False) -> np.ndarray:
+        """
+        Apply mask with soft edges for natural look.
+        """
+        # Create soft mask
+        blur_size = self.edge_blur * 2 if extra_blur else self.edge_blur
+        if blur_size > 0:
+            soft_mask = cv2.GaussianBlur(mask.astype(np.float32), (blur_size*2+1, blur_size*2+1), 0)
+            soft_mask = soft_mask / 255.0
+        else:
+            soft_mask = mask.astype(np.float32) / 255.0
+        
+        # Apply soft mask to each channel
+        result = image.copy().astype(np.float32)
+        for c in range(3):
+            result[:, :, c] = result[:, :, c] * soft_mask
+        
+        return result.astype(np.uint8)
+
+
+# Compatibility classes for existing code
+class BackgroundMethod(Enum):
+    """Compatibility enum for existing code."""
+    GRABCUT = "dominant"
+    CONTOUR_MASK = "adaptive"
+    SKIN_MASK = "adaptive"
+    MOG2 = "edge"
+    WATERSHED = "edge"
+
+class BackgroundRemover:
+    """Compatibility class that uses the new simple system."""
+    
+    def __init__(self, method=None):
+        """Initialize with backwards compatibility."""
+        if method is None or method == BackgroundMethod.GRABCUT:
+            self.method = BackgroundMethod.GRABCUT
+            self.remover = SimpleBackgroundRemover(SimpleBackgroundMethod.DOMINANT_COLOR)
+        elif method in [BackgroundMethod.CONTOUR_MASK, BackgroundMethod.SKIN_MASK]:
+            self.method = method
+            self.remover = SimpleBackgroundRemover(SimpleBackgroundMethod.ADAPTIVE_SKIN)
+        else:
+            self.method = method
+            self.remover = SimpleBackgroundRemover(SimpleBackgroundMethod.EDGE_COLOR)
+    
+    def remove_background_from_crop(self, hand_crop: np.ndarray, 
+                                   skin_mask_crop: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Enhanced background removal for hand crops (new simple method).
+        """
+        return self.remover.remove_background_simple(hand_crop)
     
     def remove_background(self, image: np.ndarray, 
                          hand_bbox: Tuple[int, int, int, int],
                          hand_contour: Optional[np.ndarray] = None,
                          skin_mask: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Remove background from hand region using selected method.
-        
-        Args:
-            image: Input BGR image
-            hand_bbox: Hand bounding box (x, y, w, h)
-            hand_contour: Optional hand contour for contour-based methods
-            skin_mask: Optional skin detection mask
-            
-        Returns:
-            Tuple of (foreground_image, mask) where:
-            - foreground_image: Hand with background removed (transparent or black)
-            - mask: Binary mask showing hand region (255=hand, 0=background)
-        """
-        if self.method == BackgroundMethod.GRABCUT:
-            return self._grabcut_removal(image, hand_bbox)
-        elif self.method == BackgroundMethod.CONTOUR_MASK:
-            return self._contour_mask_removal(image, hand_bbox, hand_contour)
-        elif self.method == BackgroundMethod.SKIN_MASK:
-            return self._skin_mask_removal(image, hand_bbox, skin_mask)
-        elif self.method == BackgroundMethod.MOG2:
-            return self._mog2_removal(image, hand_bbox)
-        elif self.method == BackgroundMethod.WATERSHED:
-            return self._watershed_removal(image, hand_bbox)
+        """Legacy method - extracts crop and applies simple removal."""
+        x, y, w, h = hand_bbox
+        if x >= 0 and y >= 0 and x + w <= image.shape[1] and y + h <= image.shape[0]:
+            hand_crop = image[y:y+h, x:x+w]
+            return self.remover.remove_background_simple(hand_crop)
         else:
-            raise ValueError(f"Unknown background removal method: {self.method}")
-    
-    def _grabcut_removal(self, image: np.ndarray, 
-                        hand_bbox: Tuple[int, int, int, int]) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        GrabCut-based background removal (highest quality).
-        
-        GrabCut is an iterative algorithm that learns foreground/background
-        from user-provided rectangle and iteratively refines the segmentation.
-        """
-        x, y, w, h = hand_bbox
-        
-        # Create initial mask for GrabCut
-        mask = np.zeros(image.shape[:2], np.uint8)
-        
-        # Define probable foreground (smaller rect inside hand)
-        margin = self.grabcut_margin
-        fg_x = max(0, x + margin)
-        fg_y = max(0, y + margin)
-        fg_w = max(1, w - 2 * margin)
-        fg_h = max(1, h - 2 * margin)
-        
-        # Set probable foreground
-        mask[fg_y:fg_y+fg_h, fg_x:fg_x+fg_w] = cv2.GC_PR_FGD
-        
-        # Set definite background (outside bbox)
-        mask[:y, :] = cv2.GC_BGD
-        mask[y+h:, :] = cv2.GC_BGD
-        mask[:, :x] = cv2.GC_BGD
-        mask[:, x+w:] = cv2.GC_BGD
-        
-        # Set probable background (inside bbox but outside probable foreground)
-        mask[y:y+h, x:x+w][mask[y:y+h, x:x+w] == 0] = cv2.GC_PR_BGD
-        
-        # Initialize GrabCut models
-        bgd_model = np.zeros((1, 65), np.float64)
-        fgd_model = np.zeros((1, 65), np.float64)
-        
-        # Apply GrabCut
-        cv2.grabCut(image, mask, None, bgd_model, fgd_model, 
-                   self.grabcut_iterations, cv2.GC_INIT_WITH_MASK)
-        
-        # Create final mask (keep only definite and probable foreground)
-        final_mask = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
-        
-        # Clean up mask with morphological operations
-        final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_CLOSE, self.morph_kernel)
-        final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_OPEN, self.morph_kernel)
-        
-        # Apply mask to image
-        foreground = image.copy()
-        foreground[final_mask == 0] = [0, 0, 0]  # Set background to black
-        
-        return foreground, final_mask
-    
-    def _contour_mask_removal(self, image: np.ndarray, 
-                             hand_bbox: Tuple[int, int, int, int],
-                             hand_contour: Optional[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Contour-based background removal.
-        
-        Uses the hand contour detected by skin detection to create a precise mask.
-        """
-        if hand_contour is None:
-            # Fallback to simple rectangle if no contour provided
-            return self._simple_rect_removal(image, hand_bbox)
-        
-        # Create mask from contour
-        mask = np.zeros(image.shape[:2], np.uint8)
-        cv2.fillPoly(mask, [hand_contour], 255)
-        
-        # Clean up mask
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.morph_kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.morph_kernel)
-        
-        # Apply mask to image
-        foreground = image.copy()
-        foreground[mask == 0] = [0, 0, 0]
-        
-        return foreground, mask
-    
-    def _skin_mask_removal(self, image: np.ndarray, 
-                          hand_bbox: Tuple[int, int, int, int],
-                          skin_mask: Optional[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Skin detection mask-based background removal.
-        
-        Uses the skin detection mask to isolate hand regions.
-        """
-        if skin_mask is None:
-            # Fallback to simple rectangle if no skin mask provided
-            return self._simple_rect_removal(image, hand_bbox)
-        
-        x, y, w, h = hand_bbox
-        
-        # Extract skin mask for hand region
-        hand_skin_mask = skin_mask[y:y+h, x:x+w]
-        
-        # Clean up the mask
-        hand_skin_mask = cv2.morphologyEx(hand_skin_mask, cv2.MORPH_CLOSE, self.morph_kernel)
-        hand_skin_mask = cv2.morphologyEx(hand_skin_mask, cv2.MORPH_OPEN, self.morph_kernel)
-        
-        # Create full-size mask
-        full_mask = np.zeros(image.shape[:2], np.uint8)
-        full_mask[y:y+h, x:x+w] = hand_skin_mask
-        
-        # Apply mask to image
-        foreground = image.copy()
-        foreground[full_mask == 0] = [0, 0, 0]
-        
-        return foreground, full_mask
-    
-    def _mog2_removal(self, image: np.ndarray, 
-                     hand_bbox: Tuple[int, int, int, int]) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        MOG2 background subtractor-based removal.
-        
-        Uses background subtraction to identify moving foreground objects (hands).
-        Note: Requires multiple frames to build background model.
-        """
-        # Apply background subtraction
-        fg_mask = self.bg_subtractor.apply(image)
-        
-        x, y, w, h = hand_bbox
-        
-        # Extract foreground mask for hand region
-        hand_fg_mask = fg_mask[y:y+h, x:x+w]
-        
-        # Clean up the mask
-        hand_fg_mask = cv2.morphologyEx(hand_fg_mask, cv2.MORPH_CLOSE, self.morph_kernel)
-        hand_fg_mask = cv2.morphologyEx(hand_fg_mask, cv2.MORPH_OPEN, self.morph_kernel)
-        
-        # Create full-size mask
-        full_mask = np.zeros(image.shape[:2], np.uint8)
-        full_mask[y:y+h, x:x+w] = hand_fg_mask
-        
-        # Apply mask to image
-        foreground = image.copy()
-        foreground[full_mask == 0] = [0, 0, 0]
-        
-        return foreground, full_mask
-    
-    def _watershed_removal(self, image: np.ndarray, 
-                          hand_bbox: Tuple[int, int, int, int]) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Watershed algorithm-based background removal.
-        
-        Uses watershed segmentation to separate hand from background.
-        """
-        x, y, w, h = hand_bbox
-        
-        # Extract hand region
-        hand_region = image[y:y+h, x:x+w].copy()
-        
-        # Convert to grayscale
-        gray = cv2.cvtColor(hand_region, cv2.COLOR_BGR2GRAY)
-        
-        # Apply threshold to get binary image
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        
-        # Noise removal
-        kernel = np.ones((3,3), np.uint8)
-        opening = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=2)
-        
-        # Sure background area
-        sure_bg = cv2.dilate(opening, kernel, iterations=3)
-        
-        # Finding sure foreground area
-        dist_transform = cv2.distanceTransform(opening, cv2.DIST_L2, 5)
-        _, sure_fg = cv2.threshold(dist_transform, 0.7*dist_transform.max(), 255, 0)
-        
-        # Finding unknown region
-        sure_fg = np.uint8(sure_fg)
-        unknown = cv2.subtract(sure_bg, sure_fg)
-        
-        # Marker labelling
-        _, markers = cv2.connectedComponents(sure_fg)
-        markers = markers + 1
-        markers[unknown == 255] = 0
-        
-        # Apply watershed
-        markers = cv2.watershed(hand_region, markers)
-        
-        # Create mask (watershed boundaries are marked as -1)
-        hand_mask = np.where(markers > 1, 255, 0).astype(np.uint8)
-        
-        # Clean up mask
-        hand_mask = cv2.morphologyEx(hand_mask, cv2.MORPH_CLOSE, self.morph_kernel)
-        
-        # Create full-size mask
-        full_mask = np.zeros(image.shape[:2], np.uint8)
-        full_mask[y:y+h, x:x+w] = hand_mask
-        
-        # Apply mask to image
-        foreground = image.copy()
-        foreground[full_mask == 0] = [0, 0, 0]
-        
-        return foreground, full_mask
-    
-    def _simple_rect_removal(self, image: np.ndarray, 
-                            hand_bbox: Tuple[int, int, int, int]) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Simple rectangular mask removal (fallback method).
-        """
-        x, y, w, h = hand_bbox
-        
-        # Create rectangular mask
-        mask = np.zeros(image.shape[:2], np.uint8)
-        mask[y:y+h, x:x+w] = 255
-        
-        # Apply mask to image
-        foreground = image.copy()
-        foreground[mask == 0] = [0, 0, 0]
-        
-        return foreground, mask
-    
-    def create_transparent_background(self, image: np.ndarray, 
-                                    mask: np.ndarray) -> np.ndarray:
-        """
-        Create image with transparent background instead of black.
-        
-        Args:
-            image: Input BGR image
-            mask: Binary mask (255=keep, 0=transparent)
-            
-        Returns:
-            BGRA image with transparent background
-        """
-        # Convert BGR to BGRA
-        bgra = cv2.cvtColor(image, cv2.COLOR_BGR2BGRA)
-        
-        # Set alpha channel based on mask
-        bgra[:, :, 3] = mask
-        
-        return bgra
-    
-    def extract_hand_crop(self, image: np.ndarray, 
-                         hand_bbox: Tuple[int, int, int, int],
-                         mask: np.ndarray,
-                         padding: int = 10) -> np.ndarray:
-        """
-        Extract clean hand crop with background removed.
-        
-        Args:
-            image: Background-removed image
-            hand_bbox: Hand bounding box
-            mask: Hand mask
-            padding: Extra padding around the hand
-            
-        Returns:
-            Cropped hand image with clean background
-        """
-        x, y, w, h = hand_bbox
-        
-        # Add padding
-        x1 = max(0, x - padding)
-        y1 = max(0, y - padding)
-        x2 = min(image.shape[1], x + w + padding)
-        y2 = min(image.shape[0], y + h + padding)
-        
-        # Extract crop
-        hand_crop = image[y1:y2, x1:x2]
-        mask_crop = mask[y1:y2, x1:x2]
-        
-        # Ensure clean background in crop
-        hand_crop[mask_crop == 0] = [0, 0, 0]
-        
-        return hand_crop
-    
-    def visualize_removal_process(self, image: np.ndarray,
-                                 hand_bbox: Tuple[int, int, int, int],
-                                 foreground: np.ndarray,
-                                 mask: np.ndarray) -> np.ndarray:
-        """
-        Create visualization showing the background removal process.
-        
-        Args:
-            image: Original image
-            hand_bbox: Hand bounding box
-            foreground: Background-removed image
-            mask: Binary mask
-            
-        Returns:
-            Composite visualization image
-        """
-        x, y, w, h = hand_bbox
-        
-        # Create visualization panels
-        height, width = image.shape[:2]
-        vis_height = height
-        vis_width = width * 3  # Three panels side by side
-        visualization = np.zeros((vis_height, vis_width, 3), dtype=np.uint8)
-        
-        # Panel 1: Original with bounding box
-        original_with_bbox = image.copy()
-        cv2.rectangle(original_with_bbox, (x, y), (x+w, y+h), (0, 255, 0), 2)
-        cv2.putText(original_with_bbox, "Original", (10, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-        visualization[:, 0:width] = original_with_bbox
-        
-        # Panel 2: Mask visualization
-        mask_colored = cv2.applyColorMap(mask, cv2.COLORMAP_JET)
-        cv2.putText(mask_colored, f"Mask ({self.method.value})", (10, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-        visualization[:, width:2*width] = mask_colored
-        
-        # Panel 3: Result
-        result_with_label = foreground.copy()
-        cv2.putText(result_with_label, "Background Removed", (10, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-        visualization[:, 2*width:3*width] = result_with_label
-        
-        return visualization
+            # Return original image if bbox is invalid
+            return image, np.ones(image.shape[:2], dtype=np.uint8) * 255
 
-def compare_methods(image: np.ndarray, 
-                   hand_bbox: Tuple[int, int, int, int],
-                   hand_contour: Optional[np.ndarray] = None,
-                   skin_mask: Optional[np.ndarray] = None) -> np.ndarray:
+
+# Simple interface functions for easy use
+def remove_background_simple(hand_crop: np.ndarray, 
+                           method: str = "dominant",
+                           tolerance: int = 40) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Compare different background removal methods side by side.
+    Simple function to remove background from hand crop.
     
     Args:
-        image: Input image
-        hand_bbox: Hand bounding box
-        hand_contour: Optional hand contour
-        skin_mask: Optional skin mask
+        hand_crop: Cropped hand image
+        method: "dominant", "adaptive", or "edge"
+        tolerance: Color tolerance (lower = stricter)
         
     Returns:
-        Comparison visualization showing all methods
+        (clean_image, mask)
     """
-    methods = [BackgroundMethod.GRABCUT, BackgroundMethod.CONTOUR_MASK, 
-               BackgroundMethod.SKIN_MASK, BackgroundMethod.WATERSHED]
+    method_enum = {
+        "dominant": SimpleBackgroundMethod.DOMINANT_COLOR,
+        "adaptive": SimpleBackgroundMethod.ADAPTIVE_SKIN,
+        "edge": SimpleBackgroundMethod.EDGE_COLOR
+    }.get(method, SimpleBackgroundMethod.DOMINANT_COLOR)
     
-    results = []
+    remover = SimpleBackgroundRemover(method_enum)
+    remover.color_tolerance = tolerance
     
-    for method in methods:
-        try:
-            remover = BackgroundRemover(method)
-            foreground, mask = remover.remove_background(
-                image, hand_bbox, hand_contour, skin_mask
-            )
-            
-            # Add method label
-            labeled_result = foreground.copy()
-            cv2.putText(labeled_result, method.value.upper(), (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            results.append(labeled_result)
-            
-        except Exception as e:
-            # Create error panel
-            error_panel = np.zeros_like(image)
-            cv2.putText(error_panel, f"{method.value}: ERROR", (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            results.append(error_panel)
+    return remover.remove_background_simple(hand_crop)
+
+def quick_clean_hand(hand_crop: np.ndarray, strict: bool = False) -> np.ndarray:
+    """
+    Quick one-line function to clean hand crop background.
     
-    # Create grid layout (2x2)
-    height, width = image.shape[:2]
-    
-    # Resize results for grid
-    results_resized = []
-    for result in results:
-        resized = cv2.resize(result, (width//2, height//2))
-        results_resized.append(resized)
-    
-    # Create comparison grid
-    top_row = np.hstack([results_resized[0], results_resized[1]])
-    bottom_row = np.hstack([results_resized[2], results_resized[3]])
-    comparison = np.vstack([top_row, bottom_row])
-    
-    return comparison 
+    Args:
+        hand_crop: Cropped hand image
+        strict: If True, use stricter color matching
+        
+    Returns:
+        Clean hand image with background removed
+    """
+    tolerance = 25 if strict else 40
+    clean_image, _ = remove_background_simple(hand_crop, "dominant", tolerance)
+    return clean_image 
