@@ -56,13 +56,16 @@ class LiveASLRecognizer:
         """Initialize the live ASL recognition system"""
         
         self.model_path = Path(model_path)
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Set device to MPS (Apple Silicon GPU) if available, otherwise CPU
+        if torch.backends.mps.is_available():
+            self.device = torch.device('mps')
+        else:
+            self.device = torch.device('cpu')
         
         # Initialize ASL-optimized hand detector
         self.hand_detector = ASLHandDetector(
-            min_detection_confidence=0.7,
-            min_tracking_confidence=0.5,
-            stability_frames=3
+            min_detection_confidence=0.6 # Only process high-confidence hands
         )
         
         # Load trained model
@@ -165,26 +168,26 @@ class LiveASLRecognizer:
             return "Error", 0.0
     
     def draw_ui(self, frame: np.ndarray, prediction: str, confidence: float, 
-                hand_bbox: Optional[Tuple] = None) -> np.ndarray:
+                hand_info: Optional[Dict] = None) -> np.ndarray:
         """Draw the user interface on the frame"""
         
         height, width = frame.shape[:2]
         
         # Draw hand bounding box if detected
-        if hand_bbox:
-            x, y, w, h = hand_bbox
-            
-            # Check if hand is stable
-            hands = self.hand_detector.detect_hands_asl(frame, use_background_removal=False) if hasattr(self, 'hand_detector') else []
-            is_stable = any(h.get('is_stable', False) for h in hands) if hands else False
+        if hand_info:
+            x, y, w, h = hand_info['bbox']
+            is_stable = hand_info.get('is_stable', False)
+            hand_confidence = hand_info.get('confidence', 0.0)
             
             # Color based on stability
             box_color = (0, 255, 0) if is_stable else (0, 165, 255)
-            label = "Hand Stable" if is_stable else "Hand Detected"
+            label = f"Hand Stable ({hand_confidence:.1%})" if is_stable else f"Hand Detected ({hand_confidence:.1%})"
             
             cv2.rectangle(frame, (x, y), (x + w, y + h), box_color, 2)
             cv2.putText(frame, label, (x, y - 10), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
+        else:
+            hand_confidence = None
         
         # Draw prediction panel
         panel_height = 120
@@ -198,31 +201,37 @@ class LiveASLRecognizer:
             letter_thickness = 4
             letter_color = (0, 255, 255) if confidence > 0.7 else (0, 165, 255)
             
-            text_size = cv2.getTextSize(prediction, cv2.FONT_HERSHEY_BOLD, letter_size, letter_thickness)[0]
+            text_size = cv2.getTextSize(prediction, cv2.FONT_HERSHEY_SIMPLEX, letter_size, letter_thickness)[0]
             letter_x = (width - text_size[0]) // 2
             letter_y = height - 70
             
             cv2.putText(frame, prediction, (letter_x, letter_y), 
-                       cv2.FONT_HERSHEY_BOLD, letter_size, letter_color, letter_thickness)
+                       cv2.FONT_HERSHEY_SIMPLEX, letter_size, letter_color, letter_thickness)
             
             # Confidence bar
-            bar_width = 200
-            bar_height = 20
+            bar_width = 250
+            bar_height = 25
             bar_x = (width - bar_width) // 2
-            bar_y = height - 35
+            bar_y = height - 40
             
             # Background bar
             cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height), (100, 100, 100), -1)
             
             # Confidence fill
             fill_width = int(bar_width * confidence)
-            bar_color = (0, 255, 0) if confidence > 0.8 else (0, 255, 255) if confidence > 0.6 else (0, 165, 255)
-            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + fill_width, bar_y + bar_height), bar_color, -1)
+            fill_color = (0, 255, 0) if confidence > 0.8 else (0, 255, 255) if confidence > 0.6 else (0, 165, 255)
+            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + fill_width, bar_y + bar_height), fill_color, -1)
             
             # Confidence text
-            conf_text = f"{confidence:.1%}"
+            conf_text = f"Sign Confidence: {confidence:.1%}"
             cv2.putText(frame, conf_text, (bar_x + bar_width + 10, bar_y + 15), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            
+            # Display hand detection confidence if available
+            if hand_confidence is not None:
+                hand_conf_text = f"Hand Confidence: {hand_confidence:.1%}"
+                cv2.putText(frame, hand_conf_text, (10, height - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         else:
             # No hand detected
             no_hand_text = "Show your hand to camera"
@@ -243,9 +252,9 @@ class LiveASLRecognizer:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
         # Draw controls help
-        help_text = "Q: Quit | S: Stats | R: Reset | B: Reset BG | SPACE: Pause"
+        help_text = "Q: Quit | S: Stats | R: Reset"
         cv2.putText(frame, help_text, (10, height - 10), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
         
         return frame
     
@@ -255,101 +264,84 @@ class LiveASLRecognizer:
         current_time = time.time()
         
         if current_time - self.fps_start_time >= 1.0:
-            self.current_fps = self.fps_counter / (current_time - self.fps_start_time)
+            elapsed_time = current_time - self.fps_start_time
+            self.current_fps = self.fps_counter / elapsed_time
             self.fps_counter = 0
             self.fps_start_time = current_time
     
     def run(self):
-        """Main execution loop for live ASL recognition"""
+        """Main loop for the live recognition system"""
         
-        if self.model is None:
-            logger.error("❌ Cannot start - model not loaded")
-            return
-        
-        # Initialize camera
         cap = cv2.VideoCapture(0)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        cap.set(cv2.CAP_PROP_FPS, 30)
-        
         if not cap.isOpened():
             logger.error("❌ Cannot open camera")
             return
-        
-        logger.info("🎥 Starting live ASL recognition...")
-        logger.info("📋 Controls: Q=Quit | S=Stats | R=Reset | SPACE=Pause")
-        
-        try:
-            while True:
+            
+        prediction = "Show Hand"
+        confidence = 0.0
+        hand_info = None
+
+        while True:
+            if not self.paused:
                 ret, frame = cap.read()
                 if not ret:
+                    logger.error("❌ Failed to grab frame")
                     break
                 
-                if not self.paused:
-                    # Flip frame horizontally for mirror effect
-                    frame = cv2.flip(frame, 1)
+                # --- Core Processing Pipeline (OPTIMIZED) ---
+                
+                # 1. Detect hands (single call per frame)
+                detected_hands = self.hand_detector.detect_hands_asl(frame)
+                
+                # 2. If a confident hand is found, process it
+                if detected_hands:
+                    # Get the most confident hand
+                    hand_info = detected_hands[0]
                     
-                    # Get stable hand crop using ASL detector
-                    hand_crop = self.hand_detector.get_stable_hand_crop(frame)
-                    
-                    prediction = "No Hand"
-                    confidence = 0.0
-                    hand_bbox = None
-                    
+                    # 3. Predict sign from the enhanced crop
+                    hand_crop = hand_info.get('enhanced_crop')
                     if hand_crop is not None and hand_crop.size > 0:
-                        # Make prediction using enhanced crop
                         prediction, confidence = self.predict_hand_sign(hand_crop)
-                        
-                        # Get hand bbox for display
-                        hands = self.hand_detector.detect_hands_asl(frame, use_background_removal=False)
-                        if hands:
-                            stable_hands = [h for h in hands if h.get('is_stable', False)]
-                            if stable_hands:
-                                hand = max(stable_hands, key=lambda h: h['bbox'][2] * h['bbox'][3])
-                            else:
-                                hand = max(hands, key=lambda h: h['bbox'][2] * h['bbox'][3])
-                            hand_bbox = hand['bbox']
-                    
-                    # Update FPS
-                    self.update_fps()
-                
-                # Draw UI
-                frame = self.draw_ui(frame, prediction, confidence, hand_bbox)
-                
-                # Show frame
-                cv2.imshow('Live ASL Recognition', frame)
-                
-                # Handle key presses
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'):
-                    break
-                elif key == ord('s'):
-                    self.show_stats = not self.show_stats
-                elif key == ord('r'):
-                    self.hand_detector.reset()
-                    logger.info("🔄 Hand tracker reset")
-                elif key == ord('b'):
-                    if hasattr(self.hand_detector, 'reset_background'):
-                        self.hand_detector.reset_background()
-                        logger.info("🔄 Background model reset")
-                elif key == ord(' '):
-                    self.paused = not self.paused
-                    logger.info(f"⏸️ {'Paused' if self.paused else 'Resumed'}")
-        
-        except KeyboardInterrupt:
-            logger.info("⚠️ Interrupted by user")
-        
-        finally:
-            cap.release()
-            cv2.destroyAllWindows()
-            logger.info("🏁 Live ASL recognition stopped")
+                    else:
+                        prediction = "Processing..."
+                        confidence = 0.0
+                else:
+                    # No confident hand detected
+                    prediction = "Show Hand"
+                    confidence = 0.0
+                    hand_info = None
+
+                # Update performance metrics
+                self.update_fps()
+
+            # --- UI and Display ---
+            display_frame = frame.copy()
+            ui_frame = self.draw_ui(display_frame, prediction, confidence, hand_info)
+            cv2.imshow("Live ASL Recognition", ui_frame)
+
+            # --- User Input ---
+            key = cv2.waitKey(1) & 0xFF
+
+            if key == ord('q'):
+                logger.info("👋 Exiting...")
+                break
+            elif key == ord('s'):
+                self.show_stats = not self.show_stats
+            elif key == ord('r'):
+                self.hand_detector.reset()
+                logger.info("🔄 Hand detector reset.")
+            elif key == ord(' '):
+                self.paused = not self.paused
+                logger.info("⏸️ Paused" if self.paused else "▶️ Resumed")
+
+        cap.release()
+        cv2.destroyAllWindows()
 
 def main():
-    """Main entry point"""
-    logger.info("🚀 Starting Live ASL Recognition System")
-    
+    """Main function to run the recognizer"""
     recognizer = LiveASLRecognizer()
-    recognizer.run()
+    if recognizer.model:
+        recognizer.run()
 
 if __name__ == "__main__":
     main() 

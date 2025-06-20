@@ -7,9 +7,10 @@ matplotlib>=3.5.0
 scikit-learn>=1.2.0
 tqdm>=4.64.0
 
+# Computer Vision Helpers
+
 # Deep Learning and ASL Training Dependencies
 transformers>=4.21.0
-mediapipe>=0.10.0
 timm>=0.9.0
 accelerate>=0.20.0
 datasets>=2.12.0
