@@ -25,6 +25,8 @@ from typing import List, Tuple, Optional, Dict
 from dataclasses import dataclass, asdict
 
 from .vision.skin import SkinDetector
+from .vision.enhanced_hand_detector import EnhancedHandDetector
+from .vision.simple_hand_detector import SimpleHandDetector
 from .vision.tracker import MultiHandTracker, TrackedHand
 from .vision.background_removal import BackgroundRemover, BackgroundMethod
 
@@ -56,7 +58,7 @@ class DataCollector:
         (self.data_dir / "annotations").mkdir(exist_ok=True)
         
         # Initialize components with optimized settings
-        self.detector = SkinDetector()
+        self.detector = SimpleHandDetector()  # Use simple motion-based detection
         self.tracker = MultiHandTracker(max_hands=1, max_disappeared=10)  # Single hand, faster cleanup
         self.bg_remover = BackgroundRemover(BackgroundMethod.GRABCUT)  # High-quality background removal
         
@@ -74,6 +76,11 @@ class DataCollector:
         # Background removal settings
         self.use_background_removal = True  # Enable background removal for training data
         self.save_both_versions = True      # Save both original and background-removed versions
+        
+        # Detection mode settings
+        self.use_motion_detection = True     # Use motion-based filtering by default
+        self.show_motion_mask = False       # Show motion mask overlay
+        self.show_skin_mask = False         # Show skin mask overlay
         
         # Load existing data
         self._load_existing_data()
@@ -253,10 +260,13 @@ class DataCollector:
         print("\nControls:")
         print("  S - Save current hand detection (if valid)")
         print("  L - Change label")
-        print("  M - Toggle mask view")
+        print("  M - Toggle motion mask overlay")
+        print("  K - Toggle skin mask overlay")
         print("  B - Toggle background removal")
+        print("  X - Toggle motion detection (filters out static torso)")
+        print("  P - Adjust hand persistence (how long to keep tracking still hands)")
+        print("  R - Reset motion detection & tracker")
         print("  T - Tune detection thresholds")
-        print("  R - Reset tracker")
         print("  Q - Quit")
         print("\nPosition your hand in the frame and wait for GREEN 'READY' status...")
         
@@ -270,15 +280,16 @@ class DataCollector:
             
             frames_processed += 1
             
-            # Detect hands
-            hands = self.detector.detect_hands(frame, max_hands=1)
+            # Detect hands using motion + skin detection
+            hands = self.detector.detect_hands_simple(frame, max_hands=1, use_motion=self.use_motion_detection)
             
             # Update tracker
             tracked_hands = self.tracker.update(hands)
             
             # Prepare visualization
-            if show_mask:
-                display_frame = self.detector.visualize_detection(frame, show_mask=True)
+            if self.show_motion_mask or self.show_skin_mask:
+                display_frame = self.detector.visualize_simple_detection(
+                    frame, show_motion=self.show_motion_mask, show_skin=self.show_skin_mask)
             else:
                 display_frame = frame.copy()
             
@@ -316,8 +327,11 @@ class DataCollector:
             
             # Collection info
             bg_status = "BG-Remove: ON" if self.use_background_removal else "BG-Remove: OFF"
-            cv2.putText(display_frame, f"Label: {self.current_label} | Samples: {self.sample_count} | {bg_status}", 
-                       (10, info_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            motion_status = "Motion: ON" if self.use_motion_detection else "Motion: OFF"
+            persist_frames = self.detector.max_persistence_frames
+            persist_status = f"Persist: {persist_frames}f"
+            cv2.putText(display_frame, f"Label: {self.current_label} | Samples: {self.sample_count} | {bg_status} | {motion_status} | {persist_status}", 
+                       (10, info_y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 2)
             info_y += line_height
             
             # Performance info
@@ -350,21 +364,44 @@ class DataCollector:
                     self.current_label = new_label
                     print(f"Label changed to: {self.current_label}")
             elif key == ord('m'):
-                # Toggle mask view
-                show_mask = not show_mask
-                print(f"Mask view: {'ON' if show_mask else 'OFF'}")
+                # Toggle motion mask overlay
+                self.show_motion_mask = not self.show_motion_mask
+                print(f"Motion mask overlay: {'ON' if self.show_motion_mask else 'OFF'}")
+            elif key == ord('k'):
+                # Toggle skin mask overlay
+                self.show_skin_mask = not self.show_skin_mask
+                print(f"Skin mask overlay: {'ON' if self.show_skin_mask else 'OFF'}")
             elif key == ord('b'):
                 # Toggle background removal
                 self.use_background_removal = not self.use_background_removal
                 print(f"Background removal: {'ON' if self.use_background_removal else 'OFF'}")
+            elif key == ord('x'):
+                # Toggle motion detection
+                self.use_motion_detection = not self.use_motion_detection
+                mode_desc = "Motion filtering (filters out static torso)" if self.use_motion_detection else "All skin detection"
+                print(f"Detection mode: {mode_desc}")
+            elif key == ord('p'):
+                # Adjust hand persistence
+                current = self.detector.max_persistence_frames
+                print(f"\nCurrent hand persistence: {current} frames (~{current/30:.1f} seconds)")
+                print("Options: 1=Short (15 frames), 2=Medium (30 frames), 3=Long (60 frames)")
+                choice = input("Choose persistence level (1-3): ")
+                if choice == '1':
+                    self.detector.max_persistence_frames = 15
+                elif choice == '2':
+                    self.detector.max_persistence_frames = 30
+                elif choice == '3':
+                    self.detector.max_persistence_frames = 60
+                print(f"Hand persistence set to: {self.detector.max_persistence_frames} frames")
             elif key == ord('t'):
                 # Tune thresholds
                 print("Opening threshold tuning...")
                 self.detector.tune_thresholds(frame)
             elif key == ord('r'):
-                # Reset tracker
+                # Reset motion detection and tracker
+                self.detector.reset_motion_detection()
                 self.tracker = MultiHandTracker(max_hands=1, max_disappeared=10)
-                print("Tracker reset")
+                print("Motion detection and tracker reset")
         
         cap.release()
         cv2.destroyAllWindows()

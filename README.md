@@ -62,10 +62,17 @@ python -m asl_cam.collect --show-mask
 
 # Controls:
 # S - Save hand detection
-# M - Toggle mask view
-# B - Toggle background removal  
+# M - Toggle motion mask overlay
+# K - Toggle skin mask overlay  
+# B - Toggle background removal
+# X - Toggle motion detection (filters out static torso)
+# P - Adjust hand persistence (how long to keep tracking still hands)
+# R - Reset motion detection & tracker
 # T - Tune thresholds
 # Q - Quit
+
+# Documentation:
+# See ASL_PROJECT_DOCUMENTATION.md for complete development history and technical details
 ```
 
 ### Running Tests
@@ -106,6 +113,20 @@ tests/                     # Comprehensive test suite
 - Contour-based hand detection
 - Interactive threshold tuning
 - Visualization with mask overlays
+
+### Simple Motion-Based Detection (`vision/simple_hand_detector.py`) **[CURRENT]**
+- Motion + skin detection (hands move, torsos don't)
+- Background subtraction using MOG2
+- Automatic filtering of static skin regions
+- Hand persistence system for stable tracking
+- Simple and robust for shirtless scenarios
+- Real-time motion visualization
+
+### Enhanced Hand Detection (`vision/enhanced_hand_detector.py`) **[DEPRECATED]**
+- Multi-factor scoring system (position, size, shape)
+- Torso filtering for shirtless scenarios
+- Complex geometric analysis
+- **Note**: Replaced by simpler motion-based approach
 
 ### Hand Tracking (`vision/tracker.py`)
 - Kalman filter-based position prediction
