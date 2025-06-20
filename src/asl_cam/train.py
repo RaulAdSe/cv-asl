@@ -1,8 +1,8 @@
 """
 ASL Hand Sign Classification Training Module
 
-This module implements multiple lightweight model architectures for real-time
-ASL hand sign classification, with a focus on efficiency and accuracy.
+This module implements MobileNetV2-based lightweight model architectures for real-time
+ASL hand sign classification, optimized for 30 FPS performance.
 
 Author: CV-ASL Team
 Date: 2024
@@ -21,9 +21,8 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
 import mediapipe as mp
-from transformers import AutoImageProcessor, VideoMAEForVideoClassification
 import torchvision.transforms as transforms
-from torchvision.models import efficientnet_b0, mobilenet_v3_small
+from torchvision.models import mobilenet_v2
 import logging
 from typing import List, Tuple, Dict, Optional
 import time
@@ -35,19 +34,16 @@ logger = logging.getLogger(__name__)
 class ASLDataset(Dataset):
     """Dataset class for ASL hand signs with support for multiple data formats"""
     
-    def __init__(self, data_dir: str, sequence_length: int = 16, transform=None, 
-                 use_mediapipe: bool = False):
+    def __init__(self, data_dir: str, transform=None, use_mediapipe: bool = False):
         """
         Initialize ASL dataset
         
         Args:
             data_dir: Path to directory containing ASL data
-            sequence_length: Number of frames per sequence for video models
             transform: Data augmentation transforms
             use_mediapipe: Whether to extract MediaPipe hand landmarks
         """
         self.data_dir = Path(data_dir)
-        self.sequence_length = sequence_length
         self.transform = transform
         self.use_mediapipe = use_mediapipe
         
@@ -120,50 +116,74 @@ class ASLDataset(Dataset):
             
             return image, self.class_to_idx[sample['label']]
 
-class EfficientNetLSTM(nn.Module):
-    """EfficientNet backbone with LSTM for temporal modeling"""
+class MobileNetV2ASL(nn.Module):
+    """MobileNetV2 backbone optimized for 30 FPS ASL classification"""
     
-    def __init__(self, num_classes: int, sequence_length: int = 16, 
-                 hidden_size: int = 128, num_layers: int = 2):
-        super(EfficientNetLSTM, self).__init__()
+    def __init__(self, num_classes: int, input_size: int = 224, width_mult: float = 1.0):
+        super(MobileNetV2ASL, self).__init__()
         
-        # EfficientNet backbone (lightweight)
-        self.backbone = efficientnet_b0(pretrained=True)
+        # MobileNetV2 backbone with adjustable width multiplier for speed
+        self.backbone = mobilenet_v2(pretrained=True, width_mult=width_mult)
+        
         # Remove final classifier
         self.feature_dim = self.backbone.classifier[1].in_features
         self.backbone.classifier = nn.Identity()
         
-        # LSTM for temporal modeling
-        self.lstm = nn.LSTM(
-            input_size=self.feature_dim,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=0.2
+        # Custom classifier optimized for ASL
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.2),
+            nn.Linear(self.feature_dim, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(512, 256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2),
+            nn.Linear(256, num_classes)
         )
         
-        # Final classifier
+        # Initialize weights
+        self._initialize_weights()
+    
+    def _initialize_weights(self):
+        """Initialize classifier weights"""
+        for m in self.classifier.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.constant_(m.bias, 0)
+    
+    def forward(self, x):
+        # Extract features with MobileNetV2
+        features = self.backbone(x)
+        
+        # Classify
+        output = self.classifier(features)
+        
+        return output
+
+class MobileNetV2Lite(nn.Module):
+    """Ultra-lightweight version for maximum speed (targeting 60+ FPS)"""
+    
+    def __init__(self, num_classes: int):
+        super(MobileNetV2Lite, self).__init__()
+        
+        # Use width_mult=0.5 for 2x speedup
+        self.backbone = mobilenet_v2(pretrained=True, width_mult=0.5)
+        
+        # Get feature dimension
+        self.feature_dim = self.backbone.classifier[1].in_features
+        self.backbone.classifier = nn.Identity()
+        
+        # Minimal classifier for speed
         self.classifier = nn.Sequential(
-            nn.Dropout(0.3),
-            nn.Linear(hidden_size, num_classes)
+            nn.Dropout(0.2),
+            nn.Linear(self.feature_dim, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, num_classes)
         )
     
     def forward(self, x):
-        # x shape: (batch_size, sequence_length, channels, height, width)
-        batch_size, seq_len = x.size(0), x.size(1)
-        
-        # Process each frame through backbone
-        x = x.view(-1, *x.shape[2:])  # Flatten batch and sequence dimensions
-        features = self.backbone(x)  # Extract features
-        features = features.view(batch_size, seq_len, -1)  # Reshape back
-        
-        # LSTM processing
-        lstm_out, _ = self.lstm(features)
-        
-        # Use last timestep output
-        output = self.classifier(lstm_out[:, -1, :])
-        
-        return output
+        features = self.backbone(x)
+        return self.classifier(features)
 
 class MediaPipeClassifier(nn.Module):
     """Lightweight classifier using MediaPipe hand landmarks"""
@@ -187,20 +207,22 @@ class MediaPipeClassifier(nn.Module):
         return self.classifier(x)
 
 class ASLTrainer:
-    """Main training class for ASL models"""
+    """Main training class for ASL models optimized for 30 FPS"""
     
     def __init__(self, config: Dict):
         self.config = config
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         logger.info(f"Using device: {self.device}")
         
-        # Data transforms
+        # Optimized transforms for 30 FPS (smaller input size for speed)
+        input_size = config.get('input_size', 224)
+        
         self.train_transforms = transforms.Compose([
             transforms.ToPILImage(),
-            transforms.Resize((224, 224)),
+            transforms.Resize((input_size, input_size)),
             transforms.RandomHorizontalFlip(0.5),
-            transforms.RandomRotation(10),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2),
+            transforms.RandomRotation(15),
+            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], 
                                std=[0.229, 0.224, 0.225])
@@ -208,7 +230,7 @@ class ASLTrainer:
         
         self.val_transforms = transforms.Compose([
             transforms.ToPILImage(),
-            transforms.Resize((224, 224)),
+            transforms.Resize((input_size, input_size)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], 
                                std=[0.229, 0.224, 0.225])
@@ -217,19 +239,18 @@ class ASLTrainer:
     def create_model(self, model_type: str, num_classes: int) -> nn.Module:
         """Create model based on specified type"""
         
-        if model_type == "efficientnet_lstm":
-            model = EfficientNetLSTM(
+        if model_type == "mobilenetv2":
+            model = MobileNetV2ASL(
                 num_classes=num_classes,
-                sequence_length=self.config.get('sequence_length', 16)
+                input_size=self.config.get('input_size', 224),
+                width_mult=self.config.get('width_mult', 1.0)
             )
+        
+        elif model_type == "mobilenetv2_lite":
+            model = MobileNetV2Lite(num_classes=num_classes)
         
         elif model_type == "mediapipe":
             model = MediaPipeClassifier(num_classes=num_classes)
-        
-        elif model_type == "mobilenet":
-            model = mobilenet_v3_small(pretrained=True)
-            # Modify final layer
-            model.classifier[3] = nn.Linear(model.classifier[3].in_features, num_classes)
         
         else:
             raise ValueError(f"Unknown model type: {model_type}")
@@ -282,9 +303,43 @@ class ASLTrainer:
         
         return avg_loss, accuracy
     
-    def train(self, data_dir: str, model_type: str = "efficientnet_lstm") -> Dict:
+    def benchmark_model(self, model: nn.Module, input_size: Tuple[int, int, int], 
+                       num_runs: int = 100) -> Dict:
+        """Benchmark model inference speed"""
+        model.eval()
+        
+        # Create dummy input
+        dummy_input = torch.randn(1, *input_size).to(self.device)
+        
+        # Warmup
+        for _ in range(10):
+            with torch.no_grad():
+                _ = model(dummy_input)
+        
+        # Benchmark
+        times = []
+        with torch.no_grad():
+            for _ in range(num_runs):
+                start_time = time.time()
+                _ = model(dummy_input)
+                if self.device.type == 'cuda':
+                    torch.cuda.synchronize()
+                end_time = time.time()
+                times.append(end_time - start_time)
+        
+        avg_time = np.mean(times) * 1000  # Convert to ms
+        fps = 1000 / avg_time
+        
+        return {
+            'avg_inference_time_ms': avg_time,
+            'fps': fps,
+            'times': times
+        }
+    
+    def train(self, data_dir: str, model_type: str = "mobilenetv2") -> Dict:
         """Main training function"""
         logger.info(f"Starting training with model type: {model_type}")
+        logger.info(f"Target: 30 FPS real-time performance")
         
         # Create datasets
         use_mediapipe = (model_type == "mediapipe")
@@ -302,24 +357,32 @@ class ASLTrainer:
             full_dataset, [train_size, val_size]
         )
         
-        # Create data loaders
+        # Create data loaders with optimized settings for speed
         train_loader = DataLoader(
             train_dataset, 
-            batch_size=self.config.get('batch_size', 32),
+            batch_size=self.config.get('batch_size', 64),  # Larger batch for efficiency
             shuffle=True,
-            num_workers=4
+            num_workers=self.config.get('num_workers', 4),
+            pin_memory=True if self.device.type == 'cuda' else False
         )
         
         val_loader = DataLoader(
             val_dataset,
-            batch_size=self.config.get('batch_size', 32),
+            batch_size=self.config.get('batch_size', 64),
             shuffle=False,
-            num_workers=4
+            num_workers=self.config.get('num_workers', 4),
+            pin_memory=True if self.device.type == 'cuda' else False
         )
         
         # Create model
         num_classes = len(full_dataset.classes)
         model = self.create_model(model_type, num_classes)
+        
+        # Count parameters
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        logger.info(f"Total parameters: {total_params:,}")
+        logger.info(f"Trainable parameters: {trainable_params:,}")
         
         # Loss and optimizer
         criterion = nn.CrossEntropyLoss()
@@ -344,7 +407,7 @@ class ASLTrainer:
             'val_accuracy': []
         }
         
-        num_epochs = self.config.get('num_epochs', 50)
+        num_epochs = self.config.get('num_epochs', 25)
         
         for epoch in range(num_epochs):
             start_time = time.time()
@@ -374,73 +437,127 @@ class ASLTrainer:
             # Save best model
             if val_accuracy > best_accuracy:
                 best_accuracy = val_accuracy
+                
+                # Benchmark speed
+                input_size = (3, self.config.get('input_size', 224), self.config.get('input_size', 224))
+                benchmark = self.benchmark_model(model, input_size)
+                
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'accuracy': val_accuracy,
                     'classes': full_dataset.classes,
-                    'model_type': model_type
+                    'model_type': model_type,
+                    'config': self.config,
+                    'benchmark': benchmark,
+                    'total_params': total_params
                 }, f'models/best_{model_type}_model.pth')
                 
-                logger.info(f'New best model saved with accuracy: {val_accuracy:.2f}%')
+                logger.info(f'New best model saved!')
+                logger.info(f'Accuracy: {val_accuracy:.2f}%')
+                logger.info(f'Inference speed: {benchmark["fps"]:.1f} FPS')
+                logger.info(f'Inference time: {benchmark["avg_inference_time_ms"]:.1f}ms')
+        
+        # Final benchmark
+        input_size = (3, self.config.get('input_size', 224), self.config.get('input_size', 224))
+        final_benchmark = self.benchmark_model(model, input_size)
         
         return {
             'best_accuracy': best_accuracy,
             'training_history': training_history,
             'model_type': model_type,
-            'classes': full_dataset.classes
+            'classes': full_dataset.classes,
+            'benchmark': final_benchmark,
+            'total_params': total_params
         }
 
 def compare_models(data_dir: str, config: Dict) -> Dict:
-    """Compare different model architectures"""
+    """Compare different model architectures optimized for 30 FPS"""
     results = {}
-    models_to_test = ["efficientnet_lstm", "mediapipe", "mobilenet"]
     
-    for model_type in models_to_test:
-        logger.info(f"\n{'='*50}")
-        logger.info(f"Training {model_type}")
-        logger.info(f"{'='*50}")
+    # Models to test, ordered by expected speed
+    models_to_test = [
+        ("mediapipe", "MediaPipe Features (Ultra Fast)"),
+        ("mobilenetv2_lite", "MobileNetV2 Lite (Fast)"),
+        ("mobilenetv2", "MobileNetV2 (Balanced)")
+    ]
+    
+    for model_type, description in models_to_test:
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Training {description}")
+        logger.info(f"Target: 30+ FPS real-time performance")
+        logger.info(f"{'='*60}")
         
-        trainer = ASLTrainer(config)
+        # Adjust config for each model type
+        model_config = config.copy()
+        
+        if model_type == "mediapipe":
+            model_config['batch_size'] = 128  # Faster training for simple model
+            model_config['num_epochs'] = 15
+        elif model_type == "mobilenetv2_lite":
+            model_config['input_size'] = 192  # Smaller input for speed
+            model_config['batch_size'] = 80
+        else:  # mobilenetv2
+            model_config['input_size'] = 224
+            model_config['width_mult'] = 1.0
+        
+        trainer = ASLTrainer(model_config)
         result = trainer.train(data_dir, model_type)
         results[model_type] = result
         
-        logger.info(f"{model_type} - Best Accuracy: {result['best_accuracy']:.2f}%")
+        logger.info(f"\n{description} Results:")
+        logger.info(f"Best Accuracy: {result['best_accuracy']:.2f}%")
+        logger.info(f"Inference Speed: {result['benchmark']['fps']:.1f} FPS")
+        logger.info(f"Parameters: {result['total_params']:,}")
+        
+        # Check if meets 30 FPS target
+        if result['benchmark']['fps'] >= 30:
+            logger.info("✅ MEETS 30 FPS TARGET!")
+        else:
+            logger.info("⚠️  Below 30 FPS target")
     
     return results
 
 if __name__ == "__main__":
-    # Configuration
+    # Optimized configuration for 30 FPS target
     config = {
-        'batch_size': 32,
-        'learning_rate': 0.001,
-        'num_epochs': 30,  # Start with fewer epochs for testing
+        'batch_size': 64,           # Larger batch for efficiency
+        'learning_rate': 0.002,     # Slightly higher LR for faster convergence
+        'num_epochs': 25,           # Reasonable number for good results
         'weight_decay': 1e-4,
-        'scheduler_step': 10,
-        'sequence_length': 16
+        'scheduler_step': 8,
+        'input_size': 224,          # Standard size, can be reduced for speed
+        'width_mult': 1.0,          # Full width for accuracy
+        'num_workers': 4            # Parallel data loading
     }
     
-    # Path to your ASL dataset (modify this to match your setup)
-    data_dir = "data/raw/asl_dataset/train_images"
+    # Path to your ASL dataset
+    data_dir = "data/raw/asl_dataset/unified/train_images"
     
     # Create models directory
     os.makedirs("models", exist_ok=True)
     
-    # Compare different models
-    logger.info("Starting model comparison...")
+    # Compare different models optimized for 30 FPS
+    logger.info("Starting ASL model training - Target: 30 FPS real-time")
     results = compare_models(data_dir, config)
     
     # Print final comparison
-    logger.info("\n" + "="*60)
-    logger.info("FINAL RESULTS COMPARISON")
-    logger.info("="*60)
+    logger.info("\n" + "="*80)
+    logger.info("FINAL RESULTS COMPARISON - 30 FPS TARGET")
+    logger.info("="*80)
     
     for model_type, result in results.items():
-        logger.info(f"{model_type:20} - Accuracy: {result['best_accuracy']:6.2f}%")
+        fps = result['benchmark']['fps']
+        accuracy = result['best_accuracy']
+        params = result['total_params']
+        status = "✅ MEETS TARGET" if fps >= 30 else "⚠️  BELOW TARGET"
+        
+        logger.info(f"{model_type:20} - Acc: {accuracy:6.2f}% | FPS: {fps:6.1f} | Params: {params:8,} | {status}")
     
     # Save results
-    with open('model_comparison_results.json', 'w') as f:
+    with open('model_comparison_30fps.json', 'w') as f:
         json.dump(results, f, indent=2)
     
-    logger.info("\nResults saved to 'model_comparison_results.json'")
+    logger.info(f"\nResults saved to 'model_comparison_30fps.json'")
+    logger.info("Ready for 30 FPS real-time ASL recognition! 🚀")
