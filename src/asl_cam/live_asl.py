@@ -69,7 +69,7 @@ class LiveASLRecognizer:
         self.model.to(self.device)
         self.model.eval()
         
-        self.hand_detector = ASLHandDetector(min_detection_confidence=0.6)
+        self.hand_detector = ASLHandDetector()
         self.fps_tracker = FPSTracker()
         
         self.min_pred_confidence = min_pred_confidence
@@ -83,6 +83,14 @@ class LiveASLRecognizer:
         self.last_hand_info = None
         self.last_prediction = "Show Hand"
         self.last_confidence = 0.0
+        self.last_frame = None
+
+        self.STATUS_COLORS = {
+            "TRACKED": (0, 255, 0),       # Green for stable tracking
+            "PREDICTED": (255, 255, 0),   # Yellow for Kalman filter prediction
+            "NEW_DETECTION": (0, 0, 255), # Red for a new detection
+            "LOST": (255, 0, 255),        # Magenta for lost track
+        }
 
         logger.info("🚀 Live ASL Recognizer initialized")
         logger.info(f"📱 Device: {self.device}")
@@ -132,119 +140,131 @@ class LiveASLRecognizer:
     def _process_frame(self, frame: np.ndarray):
         """
         Handles all processing for a single frame, including detection, 
-        tracking, prediction, and UI drawing.
+        tracking, and prediction. It updates the recognizer's state but
+        does not draw to the screen.
         """
         # --- Background Learning Phase ---
         if not self.hand_detector.bg_remover.bg_model_learned:
             self.hand_detector.bg_remover.learn_background(frame)
-            # The drawing for this phase will be handled in _draw_ui
+            # State is updated, UI will be drawn in the main loop
             return
 
-        # --- Main Processing (only if not paused) ---
-        if not self.paused:
-            self.fps_tracker.update()
-            
-            processed_hand, hand_info = self.hand_detector.detect_and_process_hand(
-                frame, self.model.INPUT_SIZE
-            )
-            
-            if processed_hand is not None:
-                prediction, confidence = self.model.predict(processed_hand)
-                if confidence < self.min_pred_confidence:
-                    self.last_prediction, self.last_confidence = None, 0.0
-                else:
-                    self.last_prediction, self.last_confidence = prediction, confidence
-            else:
-                self.last_prediction, self.last_confidence = None, 0.0
-                
-            self.last_hand_info = hand_info
+        # --- Normal Processing ---
+        self.fps_tracker.update()
+        
+        processed_hand, hand_info = self.hand_detector.detect_and_process_hand(
+            frame, self.model.INPUT_SIZE
+        )
+        
+        prediction, confidence = None, 0.0
+        if processed_hand is not None:
+            prediction, confidence = self.model.predict(processed_hand)
+            if confidence < self.min_pred_confidence:
+                prediction, confidence = None, 0.0
 
-    def _draw_ui(self, frame: np.ndarray):
-        """Draws the complete UI onto the frame."""
-        height, width, _ = frame.shape
-
-        # --- Draw Background Learning UI (if applicable) ---
+        # Store last results for UI drawing
+        self.last_hand_info = hand_info
+        if prediction is not None:
+            self.last_prediction = prediction
+            self.last_confidence = confidence
+        else:
+            self.last_prediction = "Show Hand"
+            self.last_confidence = 0.0
+            
+    def _draw_ui(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Draws all UI elements onto a given frame based on the recognizer's
+        current state.
+        """
+        # --- Background Learning UI ---
         if not self.hand_detector.bg_remover.bg_model_learned:
             progress = self.hand_detector.bg_remover.get_progress()
-            cv2.putText(frame, "Learning Background...", (50, height // 2 - 30), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 255), 3)
-            cv2.putText(frame, "Please keep hands out of frame.", (50, height // 2 + 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-            # Progress bar
-            cv2.rectangle(frame, (50, height // 2 + 60), (width - 50, height // 2 + 90), (100, 100, 100), -1)
-            cv2.rectangle(frame, (50, height // 2 + 60), (50 + int((width - 100) * progress), height // 2 + 90), (0, 255, 0), -1)
-            return frame # Return early
+            h, w = frame.shape[:2]
+            cv2.putText(frame, "Learning Background...", (50, h // 2 - 30), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 255), 3)
+            cv2.putText(frame, "Please keep hands out of frame.", (50, h // 2 + 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+            cv2.rectangle(frame, (50, h // 2 + 60), (w - 50, h // 2 + 90), (100, 100, 100), -1)
+            cv2.rectangle(frame, (50, h // 2 + 60), (50 + int((w - 100) * progress), h // 2 + 90), (0, 255, 0), -1)
+            return frame
 
-        # --- Draw Normal UI ---
-        # Draw stats if enabled
-        if self.show_stats:
-            fps_text = f"FPS: {self.fps_tracker.get_fps():.1f}"
-            cv2.putText(frame, fps_text, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-        # Draw hand info if available
-        if self.last_hand_info:
-            x, y, w, h = self.last_hand_info['bbox']
-            status = self.last_hand_info.get('status', 'DETECTION')
-            color = {'TRACKED': (0, 255, 0), 'PREDICTED': (0, 255, 255), 'NEW_DETECTION': (255, 0, 0)}.get(status, (255, 0, 0))
+        # --- Normal UI ---
+        hand_info = self.last_hand_info
+        prediction = self.last_prediction
+        confidence = self.last_confidence
+        
+        # Draw bounding box and status
+        if hand_info and hand_info.get("bbox") is not None:
+            bbox = hand_info["bbox"]
+            status = hand_info["status"]
+            color = self.STATUS_COLORS.get(status, (255, 0, 255))
             
+            x, y, w, h = bbox
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-            cv2.putText(frame, f"Status: {status}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-        
-        # Draw prediction text
-        pred_text = "Show Hand"
-        if self.last_prediction and self.last_confidence > 0:
-            pred_text = f"{self.last_prediction} ({self.last_confidence:.2f})"
-        
-        text_size, _ = cv2.getTextSize(pred_text, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)
-        text_x = (width - text_size[0]) // 2
-        text_y = height - 40
-        cv2.putText(frame, pred_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(frame, status, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-        # Draw controls help
-        help_text = "Q: Quit | S: Stats | R: Reset | B: Reset BG | Space: Pause"
-        cv2.putText(frame, help_text, (10, height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        # Draw Prediction
+        pred_text = f"Prediction: {prediction} ({confidence:.2f})"
+        cv2.putText(frame, pred_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        
+        # Draw FPS
+        if self.show_stats:
+            fps = self.fps_tracker.get_fps()
+            cv2.putText(frame, f"FPS: {fps:.2f}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            
+        # --- PAUSED indicator ---
+        if self.paused:
+            h, w = frame.shape[:2]
+            cv2.putText(frame, "PAUSED", (w // 2 - 100, h // 2), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 4)
+
         return frame
+        
+    def _handle_keypress(self, key: int):
+        if key == ord('q'):
+            logger.info("👋 Exiting...")
+            return
+        elif key == ord('s'):
+            self.show_stats = not self.show_stats
+        elif key == ord('r'):
+            self.hand_detector.reset()
+            logger.info("🔄 Hand detector reset.")
+        elif key == ord('b'):
+            self.hand_detector.bg_remover.reset()
+            logger.info("🔄 Background model is resetting. Please keep hands out of frame.")
+        elif key == ord(' '):
+            self.paused = not self.paused
+            logger.info("⏸️ Paused" if self.paused else "▶️ Resumed")
 
     def run(self):
-        """Main loop for the live recognition system."""
-        cap = cv2.VideoCapture(self.camera_index)
-        if not cap.isOpened():
-            logger.error("❌ Cannot open camera")
+        """Main loop for the application."""
+        logger.info("🟢 Starting camera feed...")
+        self.cap = cv2.VideoCapture(self.camera_index)
+        if not self.cap.isOpened():
+            logger.error(f"❌ Cannot open camera {self.camera_index}")
             return
-
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                logger.error("❌ Failed to grab frame")
-                break
             
-            frame = cv2.flip(frame, 1)
-
-            # Process the frame (handles learning, detection, prediction)
-            self._process_frame(frame)
-
-            # Draw the UI on a copy of the frame
-            display_frame = self._draw_ui(frame.copy())
-            
-            # Display the final result
-            cv2.imshow("Live ASL Recognition", display_frame)
-
-            # --- User Input ---
+        while self.cap.isOpened():
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 logger.info("👋 Exiting...")
                 break
-            elif key == ord('s'):
-                self.show_stats = not self.show_stats
-            elif key == ord('r'):
-                self.hand_detector.reset()
-                logger.info("🔄 Hand detector reset.")
-            elif key == ord('b'):
-                self.hand_detector.bg_remover.reset()
-                logger.info("🔄 Background model is resetting. Please keep hands out of frame.")
-            elif key == ord(' '):
-                self.paused = not self.paused
-                logger.info("⏸️ Paused" if self.paused else "▶️ Resumed")
+            self._handle_keypress(key)
+            
+            if not self.paused:
+                ret, frame = self.cap.read()
+                if not ret:
+                    logger.error("Failed to grab frame")
+                    break
+                
+                frame = cv2.flip(frame, 1)
+                self.last_frame = frame.copy() # Store the latest frame
+                self._process_frame(frame)
 
-        cap.release()
+            # Always draw the UI, even when paused.
+            # If paused, it will draw on the last saved frame.
+            if self.last_frame is not None:
+                ui_frame = self._draw_ui(self.last_frame.copy())
+                cv2.imshow("Live ASL Recognition", ui_frame)
+
+        self.cap.release()
         cv2.destroyAllWindows()
 
 def main():

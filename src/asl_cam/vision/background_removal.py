@@ -87,15 +87,18 @@ class BackgroundRemover:
             return frame, np.zeros(frame.shape[:2], dtype=np.uint8)
 
         # Get the foreground mask with a learning rate of 0 to prevent the hand from being learned.
-        fg_mask = self.bg_subtractor.apply(frame, learningRate=0)
+        fg_mask = self.bg_subtractor.apply(frame, learningRate=self.learning_rate)
 
-        # --- Clean up the mask ---
-        # 1. Threshold to get a binary mask
-        _, fg_mask = cv2.threshold(fg_mask, 200, 255, cv2.THRESH_BINARY)
-
-        # 2. Use morphological operations to remove noise and fill holes
-        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, self.open_kernel, iterations=2)
-        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, self.close_kernel, iterations=3)
+        # Apply morphological operations to clean up the mask and remove noise
+        # Using a smaller kernel and fewer iterations to be less aggressive
+        # and preserve more of the hand's shape.
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        
+        # Opening removes small noise spots
+        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        
+        # Closing fills small holes in the main object
+        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
 
         # 3. Find the largest contour, assuming it's the hand/arm.
         contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
