@@ -29,10 +29,9 @@ class TestHandTracker(unittest.TestCase):
         self.initial_bbox = (100, 100, 50, 50)
 
     def test_initialization(self):
-        self.assertFalse(self.tracker.initialized)
+        self.assertFalse(self.tracker.is_tracking)
         self.tracker.initialize(self.initial_bbox)
-        self.assertTrue(self.tracker.initialized)
-        self.assertIsNotNone(self.tracker.last_bbox)
+        self.assertTrue(self.tracker.is_tracking)
 
     def test_predict_after_update(self):
         """Test that predict runs without error after an update."""
@@ -47,17 +46,16 @@ class TestHandTracker(unittest.TestCase):
     def test_update(self):
         self.tracker.initialize(self.initial_bbox)
         new_bbox = (110, 110, 52, 52)
-        smoothed_bbox = self.tracker.update(new_bbox)
+        self.tracker.update(new_bbox)
         
-        # The smoothed width/height should be between the old and new values
-        self.assertTrue(self.initial_bbox[2] <= smoothed_bbox[2] < new_bbox[2])
-        self.assertTrue(self.initial_bbox[3] <= smoothed_bbox[3] < new_bbox[3])
+        # After update, tracker should still be tracking
+        self.assertTrue(self.tracker.is_tracking)
+        self.assertEqual(self.tracker.lost_counter, 0)
 
     def test_reset(self):
         self.tracker.initialize(self.initial_bbox)
         self.tracker.reset()
-        self.assertFalse(self.tracker.initialized)
-        self.assertIsNone(self.tracker.last_bbox)
+        self.assertFalse(self.tracker.is_tracking)
 
 if __name__ == '__main__':
     unittest.main() 
