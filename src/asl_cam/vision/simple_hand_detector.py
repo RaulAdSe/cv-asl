@@ -15,6 +15,7 @@ from typing import List, Tuple, Dict
 import logging
 
 from .skin import SkinDetector
+from .background_removal import BackgroundRemover
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,9 @@ class SimpleHandDetector(SkinDetector):
         self.min_area = min_area
         self.max_area = max_area
         self.motion_threshold = motion_threshold
+        
+        # --- NEW: Link to the advanced background remover ---
+        self.bg_remover = BackgroundRemover()
         
     def _calculate_confidence(self, contour: np.ndarray, frame_shape: Tuple[int, int]) -> float:
         """
@@ -75,7 +79,8 @@ class SimpleHandDetector(SkinDetector):
 
     def detect_hands(self, frame: np.ndarray, max_hands: int = 1) -> List[Dict]:
         """
-        Detect hands using skin color and motion on a downscaled frame for performance.
+        Detects hands using the foreground mask from the background remover.
+        This is more robust than the previous skin/motion method.
         
         Args:
             frame: BGR input frame.
@@ -84,56 +89,26 @@ class SimpleHandDetector(SkinDetector):
         Returns:
             A list of dictionaries, where each dict contains 'bbox' and 'confidence'.
         """
-        # --- Performance Optimization: Downscale frame for detection ---
-        orig_height, orig_width = frame.shape[:2]
-        scale_factor = 4 # Downscale by a factor of 4 (e.g., 640x480 -> 160x120)
-        
-        # Ensure we don't scale down too much for very small frames
-        if orig_width // scale_factor < 100:
-            scale_factor = 2
+        # --- Use the advanced background remover to get a clean foreground mask ---
+        _, fg_mask = self.bg_remover.remove_background(frame)
 
-        scaled_width = orig_width // scale_factor
-        scaled_height = orig_height // scale_factor
-        
-        scaled_frame = cv2.resize(frame, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA)
+        if not self.bg_remover.bg_model_learned:
+            # If the background isn't learned yet, we can't detect hands.
+            return []
 
-        # 1. Detect skin regions on the scaled frame
-        skin_mask = self.detect_skin_mask(scaled_frame)
-        
-        # 2. Detect motion on the scaled frame
-        motion_mask = self.background_subtractor.apply(scaled_frame)
-        motion_mask = cv2.threshold(motion_mask, 50, 255, cv2.THRESH_BINARY)[1]
-        kernel = np.ones((3, 3), np.uint8) # Smaller kernel for speed
-        motion_mask = cv2.morphologyEx(motion_mask, cv2.MORPH_OPEN, kernel)
-        
-        # 3. Combine skin and motion
-        combined_mask = cv2.bitwise_and(skin_mask, motion_mask)
-        
-        # 4. Find contours on the scaled mask
-        contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Find contours on the clean foreground mask
+        contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         valid_hands = []
         for contour in contours:
-            # Scale area thresholds appropriately
-            scaled_area = cv2.contourArea(contour)
-            min_scaled_area = self.min_area / (scale_factor**2)
-            max_scaled_area = self.max_area / (scale_factor**2)
-
-            if min_scaled_area < scaled_area < max_scaled_area:
-                # Calculate confidence and bbox on the scaled contour
-                confidence = self._calculate_confidence(contour, (scaled_height, scaled_width))
+            area = cv2.contourArea(contour)
+            # Use a slightly more forgiving min_area since the mask is cleaner
+            if self.min_area * 0.5 < area < self.max_area:
+                bbox = cv2.boundingRect(contour)
+                confidence = self._calculate_confidence(contour, frame.shape[:2])
                 
-                # --- Scale bounding box back to original frame size ---
-                x, y, w, h = cv2.boundingRect(contour)
-                original_bbox = (
-                    int(x * scale_factor),
-                    int(y * scale_factor),
-                    int(w * scale_factor),
-                    int(h * scale_factor)
-                )
-
                 valid_hands.append({
-                    'bbox': original_bbox,
+                    'bbox': bbox,
                     'confidence': confidence
                 })
         
@@ -143,8 +118,28 @@ class SimpleHandDetector(SkinDetector):
         return valid_hands[:max_hands]
     
     def reset(self):
-        """Resets the background subtractor."""
-        self.background_subtractor = cv2.createBackgroundSubtractorMOG2(
-            history=200, varThreshold=30, detectShadows=False
-        )
-        logger.info("SimpleHandDetector reset.") 
+        """Resets the detector's state, including the background model."""
+        self.bg_remover.reset()
+        logger.info("SimpleHandDetector reset.")
+    
+    def detect_skin_mask(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Detects the skin mask from the frame.
+        
+        Args:
+            frame: BGR input frame.
+            
+        Returns:
+            A binary mask where skin pixels are white and non-skin pixels are black.
+        """
+        # Convert the frame to HSV color space
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        
+        # Define the range of skin color in HSV
+        lower = np.array([0, 40, 80])
+        upper = np.array([20, 255, 255])
+        
+        # Threshold the HSV image to get only skin colors
+        mask = cv2.inRange(hsv, lower, upper)
+        
+        return mask 

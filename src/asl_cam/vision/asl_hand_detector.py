@@ -2,121 +2,159 @@
 """
 ASL-Optimized Hand Detector
 
-Enhances the SimpleHandDetector with features specifically for ASL,
-such as stability tracking and improved image cropping for the ML model.
-It now uses a confidence score to filter for reliable detections.
+Integrates background removal and a Kalman Filter tracker to provide a stable,
+reliable hand bounding box for ASL gesture recognition.
 """
 
 import cv2
 import numpy as np
-from typing import List, Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple
 import logging
 
-from .simple_hand_detector import SimpleHandDetector
 from .background_removal import BackgroundRemover
+from .tracker import HandTracker
 
 logger = logging.getLogger(__name__)
 
-class ASLHandDetector(SimpleHandDetector):
+class ASLHandDetector:
     """
-    Extends SimpleHandDetector with ASL-specific optimizations.
+    Detects and tracks a single hand robustly using background subtraction and
+    a Kalman filter.
+    
+    The strategy is stateful:
+    1.  Wait for a stable background model.
+    2.  Perform an initial, full-frame search for the hand.
+    3.  Once found, initialize a tracker and only search within a small
+        region of interest (ROI) around the hand's predicted position.
+    4.  If the track is lost for several frames, revert to a full-frame search.
     """
     
-    def __init__(self, 
-                 min_detection_confidence: float = 0.5,
-                 stability_frames: int = 3):
-        """
-        Initializes the ASL hand detector.
-        
-        Args:
-            min_detection_confidence: The minimum confidence score to consider a detection valid.
-            stability_frames: The number of frames to check for detection stability.
-        """
-        super().__init__()
-        
-        self.min_detection_confidence = min_detection_confidence
-        self.stability_frames = stability_frames
-        self.detection_history = []
+    def __init__(self, min_contour_area=3000, search_roi_scale=1.5):
         self.bg_remover = BackgroundRemover()
+        self.tracker = HandTracker(patience=5) # 5 frames of patience
+        self.min_contour_area = min_contour_area
+        self.search_roi_scale = search_roi_scale
         
-        logger.info(f"🤚 ASL Hand Detector initialized with min confidence: {self.min_detection_confidence}")
-    
-    def _is_detection_stable(self, new_detection_bbox: Tuple[int, int, int, int]) -> bool:
-        """
-        Checks if a detection's position is stable over recent frames.
-        """
-        if len(self.detection_history) < self.stability_frames:
-            return False
-        
-        recent_bboxes = [det['bbox'] for det in self.detection_history[-self.stability_frames:]]
-        
-        # Calculate variance of bbox centers
-        centers = [(x + w // 2, y + h // 2) for x, y, w, h in recent_bboxes + [new_detection_bbox]]
-        center_variance = np.var(centers, axis=0)
-        
-        # A stable hand shouldn't move erratically
-        return np.all(center_variance < 150) # Increased variance tolerance
-    
-    def _enhance_hand_crop(self, frame: np.ndarray, bbox: Tuple[int, int, int, int]) -> np.ndarray:
-        """
-        Extracts and enhances the hand crop for better ML model performance.
-        """
-        x, y, w, h = bbox
-        padding = 20 # Reduced padding
-        x1, y1 = max(0, x - padding), max(0, y - padding)
-        x2, y2 = min(frame.shape[1], x + w + padding), min(frame.shape[0], y + h + padding)
-        
-        hand_crop = frame[y1:y2, x1:x2]
-        
-        if hand_crop.size == 0:
-            return hand_crop
-        
-        # Lightweight enhancement: resize and basic contrast adjustment
-        # Note: CLAHE is too slow for real-time on CPU.
-        # A simple brightness/contrast adjustment is much faster.
-        try:
-            hand_crop = cv2.convertScaleAbs(hand_crop, alpha=1.1, beta=5)
-        except cv2.error:
-            logger.debug("Could not enhance hand crop.")
-            
-        return hand_crop
+        logger.info(f"🤚 ASL Hand Detector initialized.")
 
-    def detect_hands_asl(self, frame: np.ndarray) -> List[Dict]:
+    def _find_best_hand_contour(self, mask: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+        """Finds the largest contour in a binary mask."""
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+            
+        largest_contour = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(largest_contour) < self.min_contour_area:
+            return None
+            
+        return cv2.boundingRect(largest_contour)
+
+    def _get_search_roi(self, bbox: Tuple[int, int, int, int], frame_shape: Tuple[int, ...]) -> Tuple[int, int, int, int]:
+        """Calculates an expanded search ROI around a given bounding box."""
+        x, y, w, h = bbox
+        
+        # Expand the ROI to give the tracker some breathing room
+        new_w = int(w * self.search_roi_scale)
+        new_h = int(h * self.search_roi_scale)
+        
+        # Center the new ROI
+        new_x = max(0, x - (new_w - w) // 2)
+        new_y = max(0, y - (new_h - h) // 2)
+        
+        # Ensure the ROI is within frame bounds
+        new_x2 = min(frame_shape[1], new_x + new_w)
+        new_y2 = min(frame_shape[0], new_y + new_h)
+        
+        return new_x, new_y, new_x2 - new_x, new_y2 - new_y
+
+    def _preprocess_hand(self, frame: np.ndarray, bbox: Tuple[int, int, int, int], target_size: int) -> Optional[np.ndarray]:
+        """Crops, squares, and enhances the hand image for the model."""
+        x, y, w, h = bbox
+        if w <= 0 or h <= 0: return None
+        
+        center_x, center_y, max_dim = x + w // 2, y + h // 2, max(w, h)
+        
+        crop_x1 = max(0, center_x - max_dim // 2)
+        crop_y1 = max(0, center_y - max_dim // 2)
+        crop_x2 = min(frame.shape[1], center_x + max_dim // 2)
+        crop_y2 = min(frame.shape[0], center_y + max_dim // 2)
+        
+        hand_crop = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+        if hand_crop.size == 0: return None
+        
+        # Resize to square
+        resized = cv2.resize(hand_crop, (target_size, target_size), interpolation=cv2.INTER_AREA)
+        
+        # Basic enhancement
+        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+        enhanced = cv2.convertScaleAbs(gray, alpha=1.2, beta=10)
+        
+        # Return in BGR format
+        return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+
+    def detect_and_process_hand(self, frame: np.ndarray, target_size: int) -> Tuple[Optional[np.ndarray], Optional[Dict]]:
         """
-        Detects hands with ASL optimizations, filtering by confidence.
-        
-        Args:
-            frame: The input BGR frame.
-            
-        Returns:
-            A list of detected hands, each with enhanced information.
+        The main pipeline for detecting, tracking, and processing the hand.
+        This version ensures that a "ghost" bounding box is not shown when the
+        hand is temporarily lost, and that full-frame detection resumes reliably.
         """
-        # Get raw detections from the parent SimpleHandDetector
-        raw_hands = super().detect_hands(frame, max_hands=2)
+        _, fg_mask = self.bg_remover.remove_background(frame)
+        hand_bbox = None
+        status = "LOST" # Default status if nothing is found
+
+        if self.tracker.is_tracking:
+            # --- TRACKING STATE ---
+            # We believe a hand is present. Let's try to track it.
+            predicted_bbox, pred_status = self.tracker.predict()
+
+            if pred_status == "LOST":
+                # The tracker gave up. It is now reset.
+                # We'll let the logic fall through to the SEARCHING state below.
+                pass
+            else:
+                # Tracker is still active. Search for the hand in the predicted ROI.
+                roi_bbox = self._get_search_roi(predicted_bbox, frame.shape)
+                x, y, w, h = roi_bbox
+                
+                # We need to handle the case where the ROI is empty
+                if w > 0 and h > 0:
+                    best_in_roi = self._find_best_hand_contour(fg_mask[y:y+h, x:x+w])
+                else:
+                    best_in_roi = None
+
+                if best_in_roi:
+                    # SUCCESS: We found the hand. Update the tracker with the new location.
+                    gx, gy, gw, gh = best_in_roi
+                    hand_bbox = (gx + x, gy + y, gw, gh)
+                    self.tracker.update(hand_bbox)
+                    status = "TRACKED"
+                else:
+                    # MISS: No hand in the ROI. Tell the tracker.
+                    # It will start its patience countdown. No box will be shown.
+                    self.tracker.update(None)
+                    status = "LOST"
         
-        enhanced_hands = []
-        for hand in raw_hands:
-            # Critical step: Filter by confidence score
-            if hand['confidence'] < self.min_detection_confidence:
-                continue
+        if not self.tracker.is_tracking:
+            # --- SEARCHING STATE ---
+            # The tracker is not active, so we search the whole frame.
+            status = "LOST"
+            hand_bbox = self._find_best_hand_contour(fg_mask)
+            if hand_bbox:
+                # SUCCESS: We found a new hand. Initialize the tracker.
+                self.tracker.initialize(hand_bbox)
+                status = "NEW_DETECTION"
+
+        # --- Prepare Output ---
+        processed_hand, hand_info = None, None
+        if hand_bbox is not None:
+            # Only create info dict if we have a box to draw.
+            hand_info = {"bbox": hand_bbox, "status": status}
+            processed_hand = self._preprocess_hand(frame, hand_bbox, target_size)
             
-            bbox = hand['bbox']
-            
-            # Enhance the detection with more info
-            hand['is_stable'] = self._is_detection_stable(bbox)
-            hand['enhanced_crop'] = self._enhance_hand_crop(frame, bbox)
-            
-            enhanced_hands.append(hand)
-        
-        # Update stability history only with high-confidence detections
-        self.detection_history.extend(enhanced_hands)
-        self.detection_history = self.detection_history[-self.stability_frames:]
-        
-        return enhanced_hands
-    
+        return processed_hand, hand_info
+
     def reset(self):
-        """Resets detector state."""
-        super().reset()
-        self.detection_history.clear()
-        self.bg_remover = BackgroundRemover()
+        """Resets the state of the detector and its components."""
+        self.bg_remover.reset()
+        self.tracker.reset()
         logger.info("ASL Hand Detector state has been reset.") 

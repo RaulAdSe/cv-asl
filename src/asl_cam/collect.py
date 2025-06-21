@@ -23,12 +23,15 @@ import argparse
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict
 from dataclasses import dataclass, asdict
+import logging
 
 from .vision.skin import SkinDetector
 from .vision.enhanced_hand_detector import EnhancedHandDetector
 from .vision.simple_hand_detector import SimpleHandDetector
-from .vision.tracker import MultiHandTracker, TrackedHand
-from .vision.background_removal import BackgroundRemover, BackgroundMethod
+from .vision.background_removal import BackgroundRemover
+from .preprocess import Preprocessor
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class Sample:
