@@ -58,8 +58,8 @@ class TestLiveASLIntegration:
         CHECKS: Detector exists and can be used.
         """
         assert live_recognizer.hand_detector is not None
-        # Should have either MediaPipe or fallback detector
-        assert hasattr(live_recognizer.hand_detector, 'detect_and_track')
+        # Should have our advanced detection pipeline
+        assert hasattr(live_recognizer.hand_detector, 'detect_and_process_hand')
     
     def test_end_to_end_pipeline_no_hands(self, live_recognizer, asl_detector, sample_frame):
         """

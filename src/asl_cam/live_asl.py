@@ -166,7 +166,7 @@ class LiveASLRecognizer:
         
         prediction, confidence = None, 0.0
         if processed_hand is not None:
-            prediction, confidence = self.model.predict(processed_hand)
+            prediction, confidence = self.predict_hand_sign(processed_hand)
             if confidence < self.min_pred_confidence:
                 prediction, confidence = None, 0.0
 
