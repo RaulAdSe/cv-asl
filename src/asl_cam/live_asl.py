@@ -53,8 +53,8 @@ class LiveASLRecognizer:
     Combines hand detection with trained model for real-time ASL prediction
     """
     
-    def __init__(self, model_path: str = "models/asl_model.pth", 
-                 min_pred_confidence: float = 0.7,
+    def __init__(self, model_path: str = "src/asl_dl/models/asl_abc_model.pth", 
+                 min_pred_confidence: float = 0.3,
                  camera_index: int = 0):
         """
         Initializes the ASL recognizer.
@@ -102,7 +102,16 @@ class LiveASLRecognizer:
 
         logger.info("🚀 Live ASL Recognizer initialized")
         logger.info(f"📱 Device: {self.device}")
-        self.classes = sorted(list(self.model.class_map.keys()))
+        
+        # Extract classes from model, with fallback
+        if self.model.class_map is not None:
+            self.classes = sorted(list(self.model.class_map.keys()))
+        else:
+            # Fallback for models without class_map
+            self.classes = ['A', 'B', 'C']  # Default ASL classes
+            self.model.class_map = {cls: idx for idx, cls in enumerate(self.classes)}
+            logger.warning(f"Model missing class_map, using default: {self.model.class_map}")
+            
         logger.info(f"🎯 Classes: {self.classes}")
     
     def predict_hand_sign(self, hand_crop: np.ndarray) -> Tuple[str, float]:
@@ -161,7 +170,7 @@ class LiveASLRecognizer:
         self.fps_tracker.update()
         
         processed_hand, hand_info = self.hand_detector.detect_and_process_hand(
-            frame, self.model.INPUT_SIZE
+            frame, 224  # Use fixed size since model.INPUT_SIZE might not exist
         )
         
         prediction, confidence = None, 0.0
