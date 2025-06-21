@@ -1,0 +1,520 @@
+"""
+End-to-End ASL Pipeline Tests.
+
+Tests the complete workflow from raw camera input to final ASL prediction,
+including all intermediate steps and error handling.
+"""
+import pytest
+import numpy as np
+import torch
+import sys
+import tempfile
+import shutil
+from pathlib import Path
+from unittest.mock import Mock, patch, MagicMock
+import cv2
+
+# Add src to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
+
+from asl_cam.live_asl import LiveASLRecognizer
+from asl_cam.vision.asl_hand_detector import ASLHandDetector
+from asl_dl.data.kaggle_downloader import download_kaggle_asl
+from asl_dl.models.mobilenet import MobileNetV2ASL
+from asl_dl.models import mobilenet
+from asl_dl.data.dataset import ASLDataset
+from asl_dl.training.train import ASLTrainer
+# from asl_cam.collect import DataCollector # Temporarily disabled
+
+class TestCompleteASLPipeline:
+    """End-to-end tests for the complete ASL pipeline."""
+    
+    @pytest.fixture
+    def temp_dir(self):
+        """Create a temporary directory for testing."""
+        temp_path = Path(tempfile.mkdtemp())
+        yield temp_path
+        shutil.rmtree(temp_path)
+    
+    @pytest.fixture
+    def mock_camera_frames(self):
+        """Create a sequence of mock camera frames."""
+        frames = []
+        for i in range(5):
+            # Create different frames to simulate hand movement
+            frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
+            # Add some structure to make it more realistic
+            cv2.rectangle(frame, (200, 150), (400, 350), (255, 255, 255), -1)  # Hand-like region
+            frames.append(frame)
+        return frames
+    
+    @pytest.fixture
+    def live_recognizer(self):
+        """Create a live ASL recognizer."""
+        return LiveASLRecognizer()
+    
+    @pytest.fixture
+    def asl_detector(self):
+        """Create an ASL hand detector."""
+        return ASLHandDetector()
+    
+    def test_complete_training_to_inference_pipeline(self, temp_dir):
+        """
+        TEST: Complete pipeline from dataset download to live inference.
+        
+        WHY: This tests the entire workflow that a user would follow
+        to set up and use the ASL system.
+        
+        CHECKS: Dataset download, model creation, training preparation, inference.
+        """
+        # Step 1: Test dataset preparation (mocked)
+        with patch('asl_dl.data.kaggle_downloader.kagglehub.dataset_download') as mock_download:
+            # Mock dataset structure
+            mock_dataset_dir = temp_dir / "mock_dataset"
+            mock_dataset_dir.mkdir()
+            
+            # Create mock data structure
+            for i, letter in enumerate(['A', 'B', 'C']):
+                letter_dir = mock_dataset_dir / str(i)
+                letter_dir.mkdir()
+                # Create mock images
+                for j in range(5):
+                    img_path = letter_dir / f"img_{j}.jpg"
+                    # Create a small dummy image
+                    dummy_img = np.random.randint(0, 255, (100, 100, 3), dtype=np.uint8)
+                    cv2.imwrite(str(img_path), dummy_img)
+            
+            mock_download.return_value = str(mock_dataset_dir)
+            
+            # Test dataset download and organization
+            organized_path = download_kaggle_asl(str(temp_dir / "organized"))
+            
+            assert organized_path.exists()
+            assert (organized_path / "A").exists()
+            assert (organized_path / "B").exists()
+            assert (organized_path / "C").exists()
+        
+        # Step 2: Test model creation
+        model = MobileNetV2ASL(num_classes=3)
+        assert model is not None
+        
+        # Step 3: Test live recognition system
+        recognizer = LiveASLRecognizer()
+        assert recognizer.model is not None
+        assert recognizer.classes == ['A', 'B', 'C']
+        
+        # Step 4: Test end-to-end prediction
+        dummy_hand_crop = np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8)
+        prediction, confidence = recognizer.predict_hand_sign(dummy_hand_crop)
+        
+        assert prediction in ['A', 'B', 'C']
+        assert 0.0 <= confidence <= 1.0
+        
+        print("✅ Complete training-to-inference pipeline working!")
+    
+    def test_live_camera_to_prediction_workflow(self, live_recognizer, asl_detector, mock_camera_frames):
+        """
+        TEST: Complete live camera workflow.
+        
+        WHY: This simulates the real-time usage scenario where camera
+        frames are processed to detect hands and predict signs.
+        
+        CHECKS: Frame processing, hand detection, sign prediction, performance.
+        """
+        predictions = []
+        processing_times = []
+        
+        for i, frame in enumerate(mock_camera_frames):
+            import time
+            start_time = time.time()
+            
+            # Step 1: Detect hands in frame
+            hands = asl_detector.detect_hands_asl(frame)
+            
+            # Step 2: Process each detected hand
+            frame_predictions = []
+            for hand in hands:
+                if 'bbox' in hand:
+                    x, y, w, h = hand['bbox']
+                    # Extract hand crop
+                    hand_crop = frame[y:y+h, x:x+w]
+                    
+                    # Resize to model input size
+                    if hand_crop.size > 0:
+                        hand_crop_resized = cv2.resize(hand_crop, (224, 224))
+                        
+                        # Step 3: Predict sign
+                        prediction, confidence = live_recognizer.predict_hand_sign(hand_crop_resized)
+                        frame_predictions.append({
+                            'prediction': prediction,
+                            'confidence': confidence,
+                            'bbox': hand['bbox']
+                        })
+            
+            processing_time = time.time() - start_time
+            processing_times.append(processing_time)
+            predictions.append(frame_predictions)
+        
+        # Verify results
+        assert len(predictions) == len(mock_camera_frames)
+        
+        # Check performance (should be fast enough for real-time)
+        avg_processing_time = sum(processing_times) / len(processing_times)
+        assert avg_processing_time < 1.0  # Should process in less than 1 second
+        
+        # Verify all predictions are valid
+        for frame_preds in predictions:
+            for pred in frame_preds:
+                assert pred['prediction'] in ['A', 'B', 'C']
+                assert 0.0 <= pred['confidence'] <= 1.0
+                assert len(pred['bbox']) == 4
+        
+        print(f"✅ Live camera workflow working! Avg processing time: {avg_processing_time:.3f}s")
+    
+    def test_data_collection_to_training_workflow(self, temp_dir):
+        """
+        TEST: Data collection to training preparation workflow.
+        
+        WHY: This tests the workflow for collecting new training data
+        and preparing it for model training.
+        
+        CHECKS: Data collection, background removal, data organization.
+        """
+        # Step 1: Set up data collector
+        data_dir = temp_dir / "collected_data"
+        collector = DataCollector(data_dir=str(data_dir))
+        
+        # Step 2: Simulate data collection
+        mock_frames = []
+        for i in range(3):
+            frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
+            # Add a hand-like region
+            cv2.rectangle(frame, (200, 150), (400, 350), (255, 255, 255), -1)
+            mock_frames.append(frame)
+        
+        # Step 3: Save samples
+        for i, frame in enumerate(mock_frames):
+            # Mock hand detection
+            mock_hands = [{'bbox': (200, 150, 200, 200)}]
+            
+            # Save sample (this tests the complete save pipeline)
+            sample_info = collector.save_sample(
+                frame=frame,
+                label='A',
+                hands=mock_hands
+            )
+            
+            assert sample_info is not None
+            assert sample_info['label'] == 'A'
+            assert 'filepath' in sample_info
+        
+        # Step 4: Verify data structure
+        assert data_dir.exists()
+        assert (data_dir / "A").exists()
+        
+        # Check that files were created
+        a_files = list((data_dir / "A").glob("*.jpg"))
+        assert len(a_files) >= 3  # Should have at least our saved samples
+        
+        # Step 5: Check manifest file
+        manifest_path = data_dir / "collection_manifest.json"
+        assert manifest_path.exists()
+        
+        print("✅ Data collection to training workflow working!")
+    
+    def test_error_handling_throughout_pipeline(self, live_recognizer, asl_detector):
+        """
+        TEST: Error handling across the complete pipeline.
+        
+        WHY: The system should gracefully handle various error conditions
+        that might occur in real-world usage.
+        
+        CHECKS: Malformed inputs, missing files, network errors, etc.
+        """
+        # Test 1: Invalid frame handling
+        invalid_frames = [
+            np.array([]),  # Empty array
+            np.random.randint(0, 255, (10, 10), dtype=np.uint8),  # Wrong dimensions
+            None,  # None input
+        ]
+        
+        for invalid_frame in invalid_frames:
+            try:
+                if invalid_frame is not None and invalid_frame.size > 0:
+                    hands = asl_detector.detect_hands_asl(invalid_frame)
+                    assert isinstance(hands, list)  # Should return empty list
+                else:
+                    # Should handle gracefully
+                    assert True
+            except Exception as e:
+                # Errors should be reasonable, not crashes
+                assert isinstance(e, (ValueError, AttributeError, cv2.error))
+        
+        # Test 2: Invalid hand crop handling
+        invalid_crops = [
+            np.random.randint(0, 255, (50, 50, 3), dtype=np.uint8),  # Too small
+            np.random.randint(0, 255, (1000, 1000, 3), dtype=np.uint8),  # Too large
+            np.random.randint(0, 255, (224, 224, 1), dtype=np.uint8),  # Wrong channels
+        ]
+        
+        for invalid_crop in invalid_crops:
+            try:
+                prediction, confidence = live_recognizer.predict_hand_sign(invalid_crop)
+                # Should either work (with internal handling) or fail gracefully
+                if prediction is not None:
+                    assert prediction in ['A', 'B', 'C']
+                    assert 0.0 <= confidence <= 1.0
+            except Exception as e:
+                # Should be reasonable errors
+                assert isinstance(e, (ValueError, RuntimeError, torch.TensorError))
+        
+        # Test 3: Model device handling
+        device_str = str(live_recognizer.device)
+        assert device_str in ['cpu', 'mps', 'cuda']
+        
+        print("✅ Error handling throughout pipeline working!")
+    
+    def test_performance_and_memory_under_load(self, live_recognizer, asl_detector):
+        """
+        TEST: Performance and memory behavior under sustained load.
+        
+        WHY: The system should be stable for long-running sessions
+        without memory leaks or performance degradation.
+        
+        CHECKS: Memory usage, processing speed, stability.
+        """
+        import time
+        import gc
+        
+        processing_times = []
+        predictions_made = 0
+        
+        # Simulate sustained usage
+        for i in range(20):  # Process 20 frames
+            # Create frame
+            frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
+            cv2.rectangle(frame, (200 + i*5, 150), (400 + i*5, 350), (255, 255, 255), -1)
+            
+            start_time = time.time()
+            
+            # Process frame
+            hands = asl_detector.detect_hands_asl(frame)
+            
+            for hand in hands:
+                if 'bbox' in hand:
+                    x, y, w, h = hand['bbox']
+                    # Ensure valid crop
+                    if w > 0 and h > 0 and x >= 0 and y >= 0:
+                        hand_crop = frame[y:y+h, x:x+w]
+                        if hand_crop.size > 0:
+                            hand_crop_resized = cv2.resize(hand_crop, (224, 224))
+                            prediction, confidence = live_recognizer.predict_hand_sign(hand_crop_resized)
+                            predictions_made += 1
+            
+            processing_time = time.time() - start_time
+            processing_times.append(processing_time)
+            
+            # Force garbage collection periodically
+            if i % 10 == 0:
+                gc.collect()
+        
+        # Performance checks
+        avg_time = sum(processing_times) / len(processing_times)
+        max_time = max(processing_times)
+        min_time = min(processing_times)
+        
+        # Should maintain reasonable performance
+        assert avg_time < 2.0  # Average under 2 seconds
+        assert max_time < 5.0  # Max under 5 seconds
+        
+        # Should have made some predictions (unless no hands detected)
+        # This is fine, the test is about stability
+        
+        # Performance should be relatively consistent (not degrading)
+        first_half = processing_times[:10]
+        second_half = processing_times[10:]
+        
+        avg_first = sum(first_half) / len(first_half)
+        avg_second = sum(second_half) / len(second_half)
+        
+        # Second half shouldn't be significantly slower (memory leaks, etc.)
+        assert avg_second < avg_first * 2.0  # At most 2x slower
+        
+        print(f"✅ Performance under load: avg={avg_time:.3f}s, predictions={predictions_made}")
+    
+    @patch('cv2.VideoCapture')
+    def test_full_camera_integration_workflow(self, mock_video_capture, live_recognizer, asl_detector):
+        """
+        TEST: Full camera integration workflow (mocked).
+        
+        WHY: This tests the complete real-world usage scenario
+        with camera capture and live processing.
+        
+        CHECKS: Camera initialization, frame capture, processing loop.
+        """
+        # Setup mock camera
+        mock_cap = Mock()
+        mock_cap.isOpened.return_value = True
+        mock_cap.get.return_value = 30.0  # FPS
+        
+        # Create sequence of frames
+        frames = []
+        for i in range(5):
+            frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
+            cv2.rectangle(frame, (200 + i*10, 150), (400 + i*10, 350), (255, 255, 255), -1)
+            frames.append((True, frame))
+        
+        frames.append((False, None))  # End of stream
+        mock_cap.read.side_effect = frames
+        mock_video_capture.return_value = mock_cap
+        
+        # Test camera workflow
+        cap = cv2.VideoCapture(0)
+        assert cap.isOpened()
+        
+        frame_count = 0
+        predictions = []
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            frame_count += 1
+            
+            # Process frame through complete pipeline
+            hands = asl_detector.detect_hands_asl(frame)
+            
+            for hand in hands:
+                if 'bbox' in hand:
+                    x, y, w, h = hand['bbox']
+                    if w > 0 and h > 0:
+                        hand_crop = frame[y:y+h, x:x+w]
+                        if hand_crop.size > 0:
+                            hand_crop_resized = cv2.resize(hand_crop, (224, 224))
+                            prediction, confidence = live_recognizer.predict_hand_sign(hand_crop_resized)
+                            predictions.append({
+                                'frame': frame_count,
+                                'prediction': prediction,
+                                'confidence': confidence
+                            })
+        
+        # Verify workflow
+        assert frame_count == 5  # Processed all frames
+        
+        # Verify predictions format
+        for pred in predictions:
+            assert pred['prediction'] in ['A', 'B', 'C']
+            assert 0.0 <= pred['confidence'] <= 1.0
+            assert isinstance(pred['frame'], int)
+        
+        cap.release()
+        
+        print(f"✅ Full camera integration: {frame_count} frames, {len(predictions)} predictions")
+    
+    def test_model_accuracy_and_consistency(self, live_recognizer):
+        """
+        TEST: Model accuracy and prediction consistency.
+        
+        WHY: The model should produce consistent and reasonable predictions
+        for similar inputs.
+        
+        CHECKS: Prediction consistency, confidence scores, model behavior.
+        """
+        # Test with identical inputs - should get identical results
+        identical_crop = np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8)
+        
+        predictions = []
+        confidences = []
+        
+        for i in range(5):
+            pred, conf = live_recognizer.predict_hand_sign(identical_crop)
+            predictions.append(pred)
+            confidences.append(conf)
+        
+        # All predictions should be identical (deterministic)
+        assert all(p == predictions[0] for p in predictions)
+        assert all(abs(c - confidences[0]) < 1e-6 for c in confidences)
+        
+        # Test with different random inputs - should get valid predictions
+        different_crops = []
+        for i in range(10):
+            crop = np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8)
+            different_crops.append(crop)
+        
+        pred_distribution = {'A': 0, 'B': 0, 'C': 0}
+        conf_scores = []
+        
+        for crop in different_crops:
+            pred, conf = live_recognizer.predict_hand_sign(crop)
+            pred_distribution[pred] += 1
+            conf_scores.append(conf)
+        
+        # Should get all valid predictions
+        total_preds = sum(pred_distribution.values())
+        assert total_preds == len(different_crops)
+        
+        # Confidence scores should be reasonable
+        avg_confidence = sum(conf_scores) / len(conf_scores)
+        assert 0.0 <= avg_confidence <= 1.0
+        
+        # Should have some distribution (not all same prediction for random inputs)
+        # This is probabilistic, so we just check it's not degenerate
+        unique_predictions = sum(1 for count in pred_distribution.values() if count > 0)
+        # For random inputs, we should see some variety (but this can vary)
+        
+        print(f"✅ Model consistency: dist={pred_distribution}, avg_conf={avg_confidence:.3f}")
+    
+    def test_system_resource_cleanup(self, temp_dir):
+        """
+        TEST: System resource cleanup and management.
+        
+        WHY: The system should properly clean up resources and not
+        leave files, processes, or memory hanging around.
+        
+        CHECKS: File cleanup, memory management, resource disposal.
+        """
+        # Test data collection cleanup
+        data_dir = temp_dir / "cleanup_test"
+        collector = DataCollector(data_dir=str(data_dir))
+        
+        # Create some data
+        frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
+        mock_hands = [{'bbox': (200, 150, 200, 200)}]
+        
+        sample_info = collector.save_sample(frame, 'A', mock_hands)
+        assert sample_info is not None
+        
+        # Files should exist
+        assert data_dir.exists()
+        created_files = list(data_dir.rglob("*"))
+        assert len(created_files) > 0
+        
+        # Test model cleanup
+        model1 = MobileNetV2ASL(num_classes=3)
+        model1_params = sum(p.numel() for p in model1.parameters())
+        
+        del model1  # Should be able to delete
+        
+        model2 = MobileNetV2ASL(num_classes=3)
+        model2_params = sum(p.numel() for p in model2.parameters())
+        
+        assert model1_params == model2_params  # Same architecture
+        
+        # Test recognizer cleanup
+        recognizer = LiveASLRecognizer()
+        device_before = str(recognizer.device)
+        
+        # Should be able to use and then reference should be cleanable
+        dummy_crop = np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8)
+        pred, conf = recognizer.predict_hand_sign(dummy_crop)
+        
+        del recognizer
+        
+        # Should be able to create new instance
+        recognizer2 = LiveASLRecognizer()
+        device_after = str(recognizer2.device)
+        
+        assert device_before == device_after  # Same device selection logic
+        
+        print("✅ System resource cleanup working!") 

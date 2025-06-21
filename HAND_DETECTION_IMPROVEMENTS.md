@@ -1,4 +1,51 @@
-# Hand Detection Improvements for Shirtless Scenarios
+# Hand Detection & Tracking Improvements
+
+This document details the series of improvements made to the hand detection and tracking system to achieve a stable, reliable, and intuitive user experience.
+
+## 1. Initial State & Problems
+
+The initial implementation suffered from several critical issues that made it difficult to use:
+
+-   **Unstable Tracking**: The bounding box would frequently flicker or disappear, even when the hand was clearly visible.
+-   **"Ghost" Tracking**: When the hand left the frame, the system would often continue to draw a "ghost" bounding box that would drift in the last known direction of movement.
+-   **Unreliable Re-detection**: After the hand left the screen and the ghost track was lost, the system would fail to re-detect the hand when it re-entered the frame.
+-   **Erratic Resizing**: The bounding box would continuously try to shrink and resize itself, even when the hand was held perfectly still, creating a jittery and distracting effect.
+
+## 2. Investigation and Root Cause Analysis
+
+Through a step-by-step debugging process, we identified three distinct root causes for these problems:
+
+### a) Flawed Re-detection Logic
+
+The core issue preventing re-detection was a bug in the tracker's "patience" mechanism. The `lost_counter` was being reset incorrectly, preventing it from ever reaching the threshold needed to trigger a full system reset. This meant the tracker never truly gave up, so the detector never switched back to its full-frame "searching" mode.
+
+### b) Over-aggressive Resizing
+
+The initial attempts to fix the erratic resizing involved adding the bounding box's `width` and `height` (and their velocities) to the Kalman Filter's state. This was a mistake. It created a filter that could develop a "shrinking velocity," where tiny errors would cause the box's predicted size to drift smaller and smaller over time, leading to the "unbounded resizing" effect.
+
+### c) The "Still Hand" Problem: Background Model Contamination
+
+The most subtle and critical issue was the "shrinking box" that occurred when the hand was held perfectly still. This was caused by the `BackgroundSubtractorMOG2` algorithm. It is designed to adapt to slow changes in the background, and it was incorrectly interpreting the stationary hand as a new part of the background. As it "learned" the hand, the foreground mask it produced would shrink, causing the bounding box to shrink with it.
+
+## 3. The Solutions
+
+A multi-part solution was implemented to address each of these root causes, resulting in the final, stable system.
+
+### a) Hybrid Tracker for Position and Size
+
+The "unbounded resizing" issue was solved by implementing a more stable, hybrid tracker:
+
+-   **Position (Kalman Filter)**: A simple and robust 4-state Kalman Filter is used to track and smooth the `(x, y)` coordinates of the hand's center. This provides excellent positional stability.
+-   **Size (Exponential Moving Average)**: The `width` and `height` of the bounding box are smoothed separately using a gentle Exponential Moving Average (EMA). This blends the newly detected size with the previously known size, preventing erratic jitter and stopping the shrinking behavior without introducing a "size velocity."
+
+### b) Freezing the Background Model
+
+The critical "still hand" problem was solved by explicitly controlling the background subtractor's learning rate.
+
+-   During the initial learning phase at startup, the model learns the static background at a normal rate.
+-   Once the main application loop begins, the `learningRate` for the background subtractor is permanently set to `0`. This **freezes the background model**, preventing it from ever being contaminated by the user's hand, no matter how long it is held still.
+
+This was the final and most important fix, which led to the rock-solid stability of the current system. The combination of a frozen background and a stable hybrid tracker ensures a smooth and reliable user experience.
 
 ## Problem Analysis
 
