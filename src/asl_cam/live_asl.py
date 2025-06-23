@@ -168,191 +168,153 @@ class LiveASLRecognizer:
     
     def _capture_and_visualize_hand_data(self, frame: np.ndarray, processed_hand: np.ndarray, 
                                        hand_info: Dict, prediction: str, confidence: float) -> None:
-        """Non-blocking ASL analysis with unified styling and proper workflow visualization."""
+        """Show exactly what happens in the live workflow - no separate processing."""
         try:
             import matplotlib.pyplot as plt
             from matplotlib.gridspec import GridSpec
             import torch
             
-            # Extract hand information and create hand crop FIRST 
+            # Extract hand information 
             bbox = hand_info.get('bbox', (0, 0, 100, 100))
             x, y, w, h = bbox
-            hand_crop = frame[y:y+h, x:x+w].copy()
             
-            # WORKFLOW CONSISTENCY: Use the same processed image for both panels
-            # processed_hand is what actually goes to the model, so use it for both
-            model_input_vis = processed_hand.copy()
+            # LIVE WORKFLOW DATA: Get the exact data that flows through the system
+            # 1. Original hand crop (what the detector extracts)
+            original_hand_crop = frame[y:y+h, x:x+w].copy()
             
-            # Convert model input for display (handles both tensor and numpy)
-            if isinstance(model_input_vis, torch.Tensor):
-                model_input_vis = self._denormalize_for_visualization(model_input_vis)
-                if len(model_input_vis.shape) == 3 and model_input_vis.shape[0] == 3:
-                    # CHW -> HWC for display
-                    model_input_vis = np.transpose(model_input_vis, (1, 2, 0))
-                model_input_vis = (model_input_vis * 255).astype(np.uint8)
-                # Ensure it's in BGR format for consistency
-                if model_input_vis.shape[-1] == 3:
-                    model_input_vis = cv2.cvtColor(model_input_vis, cv2.COLOR_RGB2BGR)
+            # 2. Background-removed crop (what the detector processes internally)
+            crop_coords = (x, y, x+w, y+h)
+            bg_removed_crop = self.hand_detector._remove_background_from_crop(original_hand_crop, crop_coords)
             
-            # Make background removed the same as model input for workflow consistency
-            hand_crop_bg_removed = model_input_vis.copy()
+            # 3. Model input (what actually goes to the model)
+            # FIX: This should be a 224x224 resize of the background removed image
+            model_input_image = cv2.resize(bg_removed_crop, (224, 224))
             
-            # CRITICAL FIX: Proper tensor shape handling for model inference
-            model_input_tensor = None
+            # 4. Get the ACTUAL model probabilities from the live prediction
+            # Re-run the same prediction to get the exact probabilities used
+            actual_prediction, actual_confidence = self.predict_hand_sign(model_input_image)
+            
+            # Get model probabilities by running inference again (this matches exactly what was used)
             model_probs = None
             try:
-                # Ensure processed_hand is properly formatted for model
-                if isinstance(processed_hand, np.ndarray):
-                    # Convert numpy to tensor with proper shape
-                    if len(processed_hand.shape) == 3:  # HWC format
-                        if processed_hand.shape[-1] == 3:  # RGB/BGR
-                            # Convert to CHW format: (H,W,C) -> (C,H,W)
-                            processed_hand_chw = np.transpose(processed_hand, (2, 0, 1))
-                            model_input_tensor = torch.from_numpy(processed_hand_chw).float()
-                        else:
-                            logger.error(f"Invalid channel count: {processed_hand.shape}")
-                            raise ValueError(f"Expected 3 channels, got {processed_hand.shape[-1]}")
-                    elif len(processed_hand.shape) == 4 and processed_hand.shape[0] == 1:  # BCHW
-                        model_input_tensor = torch.from_numpy(processed_hand[0]).float()  # Remove batch dim
-                    else:
-                        logger.error(f"Invalid processed_hand shape: {processed_hand.shape}")
-                        raise ValueError(f"Unexpected tensor shape: {processed_hand.shape}")
+                # Convert to RGB for model
+                rgb_crop = cv2.cvtColor(model_input_image, cv2.COLOR_BGR2RGB)
+                input_tensor = self.transform(rgb_crop).unsqueeze(0).to(self.device)
                 
-                elif isinstance(processed_hand, torch.Tensor):
-                    model_input_tensor = processed_hand.clone().detach()  # CRITICAL: detach() to avoid gradient errors
-                    # Ensure it's in CHW format without batch dimension
-                    if len(model_input_tensor.shape) == 4:  # BCHW -> CHW
-                        model_input_tensor = model_input_tensor[0]
-                
-                # Validate final tensor shape
-                if model_input_tensor is not None:
-                    expected_shape = (3, 224, 224)  # CHW format
-                    if model_input_tensor.shape != expected_shape:
-                        logger.error(f"Model input shape mismatch: {model_input_tensor.shape} != {expected_shape}")
-                        raise ValueError(f"Model expects {expected_shape}, got {model_input_tensor.shape}")
-                    
-                    # Get model predictions safely
-                    model_input_batch = model_input_tensor.unsqueeze(0).to(self.device)  # Add batch dimension
-                    logger.debug(f"✅ Model input shape: {model_input_batch.shape}")
-                    
-                    # CRITICAL FIX: Use detach() to avoid gradient computation errors
-                    with torch.no_grad():
-                        model_output = self.model(model_input_batch)
-                        model_probs = model_output.softmax(dim=1)[0].cpu().detach().numpy()
-                else:
-                    raise ValueError("Could not create valid model input tensor")
+                with torch.no_grad():
+                    outputs = self.model(input_tensor)
+                    probabilities = torch.nn.functional.softmax(outputs, dim=1)
+                    model_probs = probabilities[0].cpu().numpy()
                     
             except Exception as e:
-                logger.error(f"Model inference failed: {e}")
-                # Create dummy probabilities as fallback
+                logger.error(f"Failed to get actual model probabilities: {e}")
+                # Fallback dummy probabilities
                 model_probs = np.array([0.33, 0.33, 0.34])
-                logger.warning("Using dummy probabilities due to model inference failure")
             
-            # Calculate stats
+            # Calculate stats from actual data
             max_prob = np.max(model_probs) if model_probs is not None else 0.0
             entropy = -np.sum(model_probs * np.log(model_probs + 1e-8)) if model_probs is not None else 0.0
             fps = self.fps_tracker.get_fps()
             
-            # UNIFIED STYLING CONFIGURATION
+            # UNIFIED STYLING
             title_fontsize = 10
             title_color = '#2c3e50'
             bg_color = 'white'
             
-            # Create NON-BLOCKING figure
-            plt.ion()  # Turn on interactive mode for non-blocking display
+            # NON-BLOCKING figure
+            plt.ion()
             fig = plt.figure(figsize=(16, 8), facecolor=bg_color)
-            fig.suptitle('ASL Live Analysis', fontsize=14, fontweight='bold', color=title_color)
+            fig.suptitle('Live ASL Workflow Analysis', fontsize=14, fontweight='bold', color=title_color)
             
-            # Create 2x4 grid layout
+            # 2x4 grid layout
             gs = GridSpec(2, 4, figure=fig, hspace=0.3, wspace=0.25)
             
-            # Panel 1: Camera Feed
+            # Panel 1: Camera Feed (with bounding box)
             ax1 = fig.add_subplot(gs[0, 0])
             ax1.set_facecolor(bg_color)
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            ax1.imshow(frame_rgb)
-            cv2.rectangle(frame_rgb, (x, y), (x+w, y+h), (255, 0, 0), 3)
-            ax1.set_title(f'Camera Feed\n1920×1080', 
+            # Draw bounding box on frame copy
+            frame_with_box = frame_rgb.copy()
+            cv2.rectangle(frame_with_box, (x, y), (x+w, y+h), (255, 0, 0), 3)
+            ax1.imshow(frame_with_box)
+            ax1.set_title(f'Camera Feed\n{frame.shape[1]}×{frame.shape[0]}', 
                          fontsize=title_fontsize, fontweight='bold', color=title_color)
             ax1.axis('off')
 
-            # Panel 2: Hand ROI
+            # Panel 2: Original Hand Crop (extracted by detector)
             ax2 = fig.add_subplot(gs[0, 1])
             ax2.set_facecolor(bg_color)
-            hand_crop_rgb = cv2.cvtColor(hand_crop, cv2.COLOR_BGR2RGB)
-            ax2.imshow(hand_crop_rgb)
+            original_rgb = cv2.cvtColor(original_hand_crop, cv2.COLOR_BGR2RGB)
+            ax2.imshow(original_rgb)
             ax2.set_title(f'Hand ROI\n{w}×{h}px', 
                          fontsize=title_fontsize, fontweight='bold', color=title_color)
             ax2.axis('off')
 
-            # Panel 3: Original Colors (Hand ROI)
+            # Panel 3: Original Colors (from actual hand crop)
             ax3 = fig.add_subplot(gs[0, 2])
             ax3.set_facecolor(bg_color)
-            self._plot_unified_color_distribution(ax3, hand_crop, 'Original Colors', 
+            self._plot_unified_color_distribution(ax3, original_hand_crop, 'Original Colors', 
                                                 title_fontsize, title_color)
             
-            # Panel 4: Background Removed (Same as Model Input for workflow consistency)
+            # Panel 4: Background Removed (actual detector output)
             ax4 = fig.add_subplot(gs[0, 3])
             ax4.set_facecolor(bg_color)
-            if hand_crop_bg_removed is not None and hand_crop_bg_removed.size > 0:
-                hand_crop_bg_rgb = cv2.cvtColor(hand_crop_bg_removed, cv2.COLOR_BGR2RGB)
-                ax4.imshow(hand_crop_bg_rgb)
-                ax4.set_title('Background Removed\n224×224px', 
-                             fontsize=title_fontsize, fontweight='bold', color=title_color)
-            else:
-                ax4.text(0.5, 0.5, 'No BG Removal', ha='center', va='center')
-                ax4.set_title('Background Removed\n224×224px', 
-                             fontsize=title_fontsize, fontweight='bold', color=title_color)
+            bg_removed_rgb = cv2.cvtColor(bg_removed_crop, cv2.COLOR_BGR2RGB)
+            ax4.imshow(bg_removed_rgb)
+            ax4.set_title(f'Background Removed\n{bg_removed_crop.shape[1]}×{bg_removed_crop.shape[0]}px', 
+                         fontsize=title_fontsize, fontweight='bold', color=title_color)
             ax4.axis('off')
 
-            # Panel 5: Processed Colors (Same as Background Removed for consistency)
+            # Panel 5: Processed Colors (from actual background removed image)
             ax5 = fig.add_subplot(gs[1, 0])
             ax5.set_facecolor(bg_color)
-            self._plot_unified_color_distribution(ax5, hand_crop_bg_removed, 'Processed Colors', 
+            self._plot_unified_color_distribution(ax5, bg_removed_crop, 'Processed Colors', 
                                                 title_fontsize, title_color)
             
-            # Panel 6: Model Input (Same as Background Removed)
+            # Panel 6: Model Input (actual resized input to model)
             ax6 = fig.add_subplot(gs[1, 1])
             ax6.set_facecolor(bg_color)
-            model_input_display = cv2.cvtColor(model_input_vis, cv2.COLOR_BGR2RGB)
-            ax6.imshow(model_input_display)
-            ax6.set_title('Model Input\n224×224px', 
+            model_input_rgb = cv2.cvtColor(model_input_image, cv2.COLOR_BGR2RGB)
+            ax6.imshow(model_input_rgb)
+            ax6.set_title(f'Model Input\n{model_input_image.shape[1]}×{model_input_image.shape[0]}px', 
                          fontsize=title_fontsize, fontweight='bold', color=title_color)
             ax6.axis('off')
 
-            # Panel 7: Model Predictions (UNIFIED)
+            # Panel 7: Actual Model Predictions
             ax7 = fig.add_subplot(gs[1, 2])
             ax7.set_facecolor(bg_color)
             if model_probs is not None:
-                self._plot_unified_predictions(ax7, model_probs, prediction, title_fontsize, title_color)
+                self._plot_unified_predictions(ax7, model_probs, actual_prediction, title_fontsize, title_color)
             else:
                 ax7.text(0.5, 0.5, 'Model Error', ha='center', va='center')
                 ax7.set_title('Predictions\nError', fontsize=title_fontsize, fontweight='bold', color='red')
             
-            # Panel 8: Stats (UNIFIED)
+            # Panel 8: Live Stats
             ax8 = fig.add_subplot(gs[1, 3])
             ax8.set_facecolor(bg_color)
-            self._plot_unified_stats(ax8, prediction, confidence, max_prob, entropy, 
+            self._plot_unified_stats(ax8, actual_prediction, actual_confidence, max_prob, entropy, 
                                    w, h, fps, title_fontsize, title_color)
             
             plt.tight_layout()
             
-            # NON-BLOCKING DISPLAY: Show figure and continue execution
+            # NON-BLOCKING DISPLAY
             plt.show(block=False)
             plt.draw()
-            plt.pause(0.001)  # Small pause to ensure display updates
+            plt.pause(0.001)
             
-            # Clean console output
-            print(f"\n🎯 ASL Analysis Complete!")
-            print(f"  Prediction: {prediction} ({confidence:.1%})")
+            # Clean output
+            print(f"\n🎯 Live Workflow Analysis Complete!")
+            print(f"  Prediction: {actual_prediction} ({actual_confidence:.1%})")
             print(f"  Hand: {w}×{h}px | FPS: {fps:.1f}")
             if model_probs is not None:
-                print(f"  Probabilities: A={model_probs[0]:.3f}, B={model_probs[1]:.3f}, C={model_probs[2]:.3f}")
-            print(f"  📊 Visualization window opened (non-blocking)")
+                prob_str = ", ".join([f"{self.classes[i]}={model_probs[i]:.3f}" for i in range(len(self.classes))])
+                print(f"  Probabilities: {prob_str}")
+            print(f"  📊 Workflow visualization opened (non-blocking)")
             print(f"  📂 Files saved to: data/raw/captures\n")
             
-            # Save data
-            self._save_capture_data(frame, hand_crop, hand_crop_bg_removed, model_input_vis, hand_info, prediction, confidence)
+            # Save the actual workflow data
+            self._save_capture_data(frame, original_hand_crop, bg_removed_crop, model_input_image, 
+                                  hand_info, actual_prediction, actual_confidence)
             
         except Exception as e:
             logger.error(f"Error in capture visualization: {e}")
@@ -371,25 +333,37 @@ class LiveASLRecognizer:
 
         # CONSISTENT BGR HANDLING: Use same order for both plots
         colors = ['#3498db', '#27ae60', '#e74c3c']  # BGR order: Blue, Green, Red
-        labels = ['Blue', 'Green', 'Red']  # BGR order
+        labels = ['Blue', 'Green', 'Red']  # BGR order, no numbers
         
-        # Calculate mean intensity safely (BGR order)
-        if mask is not None and np.any(mask):
-            mean_intensity = cv2.mean(image, mask=mask)[:3]  # BGR order
-        else:
-            mean_intensity = cv2.mean(image)[:3]  # BGR order
-
+        # Check if this is a background-removed image (has lots of black pixels)
+        is_bg_removed = "Processed" in title and np.sum(np.all(image == [0, 0, 0], axis=2)) > (image.shape[0] * image.shape[1] * 0.3)
+        
+        max_freq = 0  # Track maximum frequency for y-axis scaling
+        
         # Plot histograms with unified style (BGR order)
         for i, (color, label) in enumerate(zip(colors, labels)):
             hist = cv2.calcHist([image], [i], mask, [256], [0, 256])
             hist = hist.flatten()
-            if hist.max() > 0:
-                hist = hist / hist.max()  # Normalize
-            ax.plot(hist, color=color, alpha=0.7, linewidth=2, 
-                   label=f'{label} ({int(mean_intensity[i])})')  # Keep BGR order: i=0->Blue, i=1->Green, i=2->Red
+            
+            # For background-removed images, skip intensity 0 to focus on hand content
+            if is_bg_removed:
+                intensities = np.arange(1, 256)  # Skip 0
+                hist_plot = hist[1:]  # Skip frequency at intensity 0
+            else:
+                intensities = np.arange(256)
+                hist_plot = hist
+            
+            # Keep raw frequency counts (no normalization)
+            max_freq = max(max_freq, np.max(hist_plot))
+            ax.plot(intensities, hist_plot, color=color, alpha=0.7, linewidth=2, label=label)
         
-        ax.set_xlim(0, 255)
-        ax.set_ylim(0, 1.0)
+        # Set axis limits
+        if is_bg_removed:
+            ax.set_xlim(1, 255)  # Skip intensity 0 for bg-removed images
+        else:
+            ax.set_xlim(0, 255)  # Full range for original images
+            
+        ax.set_ylim(0, max_freq * 1.1 if max_freq > 0 else 100)  # Raw frequency counts
         ax.set_xlabel('Intensity', fontsize=8)
         ax.set_ylabel('Frequency', fontsize=8)
         ax.legend(fontsize=8, loc='upper right')
@@ -469,22 +443,37 @@ Status: Real-time"""
             # Generate unique timestamp and random ID to avoid conflicts
             timestamp = time.time()
             time_str = time.strftime("%Y%m%d_%H%M%S", time.localtime(timestamp))
-            unique_id = str(uuid.uuid4())[:8]  # Short unique identifier
+            unique_id = str(uuid.uuid4())[:8]  # Short UUID for uniqueness
             
-            # CRITICAL FIX: Use unique directory name to avoid conflicts
-            capture_dir = Path(f"data/raw/capture_{time_str}_{unique_id}")
-            
-            # Robust directory creation
+            # CRITICAL FIX: Robust directory creation with guaranteed uniqueness
+            base_captures_dir = Path("data/raw")
             try:
-                # Ensure parent directories exist
-                capture_dir.parent.mkdir(parents=True, exist_ok=True)
+                # Create base directory if it doesn't exist
+                base_captures_dir.mkdir(parents=True, exist_ok=True)
                 
-                # Create unique capture directory 
-                capture_dir.mkdir(parents=True, exist_ok=True)
-                logger.debug(f"✅ Capture directory created: {capture_dir}")
+                # Create unique capture directory with timestamp + UUID
+                capture_dir_name = f"capture_{time_str}_{unique_id}"
+                capture_dir = base_captures_dir / capture_dir_name
+                
+                # If by some miracle this exists, add more uniqueness
+                counter = 0
+                while capture_dir.exists() and counter < 100:
+                    counter += 1
+                    capture_dir_name = f"capture_{time_str}_{unique_id}_{counter}"
+                    capture_dir = base_captures_dir / capture_dir_name
+                
+                # Create the directory 
+                capture_dir.mkdir(parents=True, exist_ok=False)  # False ensures we fail if it exists
+                logger.debug(f"✅ Unique capture directory created: {capture_dir}")
+                
+            except FileExistsError:
+                # Ultimate fallback: use temp directory
+                import tempfile
+                capture_dir = Path(tempfile.mkdtemp(prefix=f"asl_capture_{time_str}_"))
+                logger.info(f"✅ Using temp directory due to conflicts: {capture_dir}")
                 
             except Exception as e:
-                logger.warning(f"Directory creation issue: {e}")
+                logger.warning(f"Directory creation failed: {e}")
                 # Use temp directory as ultimate fallback
                 import tempfile
                 capture_dir = Path(tempfile.mkdtemp(prefix="asl_capture_"))
@@ -562,7 +551,7 @@ Status: Real-time"""
                     },
                     'system_info': {
                         'fps': fps,
-                        'processing_method': 'background_removal_then_resize',
+                        'processing_method': 'live_workflow_capture',
                         'model_input_size': '224x224',
                         'original_hand_size': f'{w}x{h}',
                         'device': str(self.device)
