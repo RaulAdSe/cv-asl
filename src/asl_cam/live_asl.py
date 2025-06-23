@@ -31,6 +31,12 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict
 import logging
 
+# Configure matplotlib for non-blocking display
+import matplotlib
+matplotlib.use('TkAgg')  # Use TkAgg backend for non-blocking windows
+import matplotlib.pyplot as plt
+plt.ion()  # Turn on interactive mode
+
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -103,6 +109,9 @@ class LiveASLRecognizer:
         self.capture_enabled = True
         self.last_processed_hand = None
         self.last_capture_frame = None
+        
+        # Visualization window management
+        self.current_viz_fig = None  # Track current visualization figure
 
         self.STATUS_COLORS = {
             "TRACKED": (0, 255, 0),       # Green for stable tracking
@@ -167,36 +176,43 @@ class LiveASLRecognizer:
     
     def _capture_and_visualize_hand_data(self, frame: np.ndarray, processed_hand: np.ndarray, 
                                        hand_info: Dict, prediction: str, confidence: float) -> None:
-        """Clean ASL analysis with unified styling and minimal titles."""
+        """Clean ASL analysis with unified styling and minimal titles - NON-BLOCKING."""
         try:
-            import matplotlib.pyplot as plt
             from matplotlib.gridspec import GridSpec
             import torch
+            
+            # Close previous visualization window if it exists
+            if self.current_viz_fig is not None:
+                plt.close(self.current_viz_fig)
+                self.current_viz_fig = None
             
             # Extract hand information and create hand crop FIRST 
             bbox = hand_info.get('bbox', (0, 0, 100, 100))
             x, y, w, h = bbox
             hand_crop = frame[y:y+h, x:x+w].copy()
-            fps = self.fps_tracker.get_fps()
             
-            # Get model probabilities
-            with torch.no_grad():
-                if isinstance(processed_hand, torch.Tensor):
-                    outputs = self.model(processed_hand.unsqueeze(0).to(self.device))
-                    probabilities = torch.nn.functional.softmax(outputs, dim=1)
-                    model_probs = probabilities[0].cpu().numpy()
-                else:
-                    model_probs = np.array([0.33, 0.33, 0.34])
-            
-            # Create background removed version for visualization
-            crop_coords = (x, y, x+w, y+h)
+            # Try to get background-removed version for visualization 
             try:
+                crop_coords = (x, y)
                 hand_crop_bg_removed = self.hand_detector._remove_background_from_crop(hand_crop, crop_coords)
+                if hand_crop_bg_removed is None:
+                    hand_crop_bg_removed = hand_crop.copy()
             except Exception as e:
-                logger.warning(f"Background removal failed: {e}")
+                logger.warning(f"Failed to get background-removed crop for visualization: {e}")
                 hand_crop_bg_removed = hand_crop.copy()
             
-            # Prepare model input visualization (denormalized)
+            # Get model probabilities 
+            if isinstance(processed_hand, torch.Tensor):
+                with torch.no_grad():
+                    outputs = self.model(processed_hand.unsqueeze(0))
+                    model_probs = torch.softmax(outputs, dim=1)[0].cpu().numpy()
+            else:
+                # Fallback probabilities
+                model_probs = np.array([0.33, 0.33, 0.34])
+            
+            fps = self.fps_tracker.get_fps()
+            
+            # Prepare model input visualization
             model_input_vis = processed_hand.copy()
             if isinstance(model_input_vis, torch.Tensor):
                 model_input_vis = model_input_vis.cpu().numpy()
@@ -216,6 +232,7 @@ class LiveASLRecognizer:
             
             # Create clean 2x4 grid
             fig = plt.figure(figsize=(16, 8))
+            self.current_viz_fig = fig  # Track this figure
             gs = GridSpec(2, 4, figure=fig, hspace=0.3, wspace=0.2)
             fig.patch.set_facecolor('white')
             
@@ -292,14 +309,20 @@ class LiveASLRecognizer:
                                    w, h, fps, title_fontsize, title_color)
             
             plt.tight_layout()
-            plt.show()
+            
+            # NON-BLOCKING DISPLAY - Keep live ASL running!
+            plt.show(block=False)
+            plt.draw()
+            plt.pause(0.001)  # Brief pause to ensure window appears
             
             # Clean console output
             print(f"\n🎯 ASL Analysis Complete!")
             print(f"  Prediction: {prediction} ({confidence:.1%})")
             print(f"  Hand: {w}×{h}px | FPS: {fps:.1f}")
             print(f"  Probabilities: A={model_probs[0]:.3f}, B={model_probs[1]:.3f}, C={model_probs[2]:.3f}")
-            print(f"  Files saved to: data/raw/captures\n")
+            print(f"  📊 Visualization window opened (non-blocking)")
+            print(f"  💾 Files saved to: data/raw/captures")
+            print(f"  🔄 Live ASL continues running...\n")
             
             # Save data
             self._save_capture_data(frame, hand_crop, hand_crop_bg_removed, processed_hand, hand_info, prediction, confidence)
@@ -1081,6 +1104,11 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
 
         self.cap.release()
         cv2.destroyAllWindows()
+        
+        # Clean up matplotlib windows
+        if self.current_viz_fig is not None:
+            plt.close(self.current_viz_fig)
+        plt.close('all')  # Close any remaining matplotlib windows
 
     def _denormalize_for_visualization(self, tensor_img: torch.Tensor) -> np.ndarray:
         """Denormalize a tensor image and convert to a displayable format."""
