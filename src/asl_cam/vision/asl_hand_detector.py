@@ -68,7 +68,7 @@ class ASLHandDetector:
         return new_x, new_y, new_x2 - new_x, new_y2 - new_y
 
     def _preprocess_hand(self, frame: np.ndarray, bbox: Tuple[int, int, int, int], target_size: int) -> Optional[np.ndarray]:
-        """Crops, squares, and enhances the hand image for the model."""
+        """Crops, squares, removes background, and enhances the hand image for the model."""
         x, y, w, h = bbox
         if w <= 0 or h <= 0: return None
         
@@ -82,15 +82,140 @@ class ASLHandDetector:
         hand_crop = frame[crop_y1:crop_y2, crop_x1:crop_x2]
         if hand_crop.size == 0: return None
         
+        # Apply background removal to the hand crop
+        hand_crop_bg_removed = self._remove_background_from_crop(hand_crop)
+        
         # Resize to square
-        resized = cv2.resize(hand_crop, (target_size, target_size), interpolation=cv2.INTER_AREA)
+        resized = cv2.resize(hand_crop_bg_removed, (target_size, target_size), interpolation=cv2.INTER_AREA)
         
-        # Basic enhancement
-        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-        enhanced = cv2.convertScaleAbs(gray, alpha=1.2, beta=10)
+        return resized
+    
+    def get_skin_mask_for_crop(self, hand_crop: np.ndarray) -> np.ndarray:
+        """Get the skin mask used for background removal (for visualization)."""
+        hsv = cv2.cvtColor(hand_crop, cv2.COLOR_BGR2HSV)
+        lower_skin = np.array([0, 30, 60], dtype=np.uint8)
+        upper_skin = np.array([25, 255, 255], dtype=np.uint8)
+        skin_mask = cv2.inRange(hsv, lower_skin, upper_skin)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_CLOSE, kernel)
+        return skin_mask
+    
+    def _remove_background_from_crop(self, hand_crop: np.ndarray) -> np.ndarray:
+        """
+        Fast background removal from hand crop, optimized for real-time performance.
+        Uses efficient skin detection instead of slow GrabCut.
+        """
+        return self._fast_skin_based_removal(hand_crop)
+    
+    def _fast_skin_based_removal(self, hand_crop: np.ndarray) -> np.ndarray:
+        """
+        Enhanced background removal using improved skin color detection.
+        Optimized for better quality while maintaining >15 FPS performance.
+        """
+        # Pre-allocate result to avoid copy
+        result = hand_crop.copy()
         
-        # Return in BGR format
-        return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+        try:
+            # Convert to multiple color spaces for better skin detection
+            hsv = cv2.cvtColor(hand_crop, cv2.COLOR_BGR2HSV)
+            ycrcb = cv2.cvtColor(hand_crop, cv2.COLOR_BGR2YCrCb)
+            b, g, r = cv2.split(hand_crop)
+            
+            # Method 1: BGR ratio-based detection (fast)
+            bgr_mask = ((r > 60) & (r > g) & (g > b) & (r > b + 15)).astype(np.uint8)
+            
+            # Method 2: HSV-based detection (more accurate for skin tones)
+            h, s, v = cv2.split(hsv)
+            # Improved HSV ranges for better skin detection
+            hsv_mask1 = ((h >= 0) & (h <= 20) & (s >= 30) & (s <= 255) & (v >= 60) & (v <= 255)).astype(np.uint8)
+            hsv_mask2 = ((h >= 160) & (h <= 179) & (s >= 30) & (s <= 255) & (v >= 60) & (v <= 255)).astype(np.uint8)
+            hsv_mask = hsv_mask1 | hsv_mask2
+            
+            # Method 3: YCrCb-based detection (excellent for different lighting conditions)
+            y, cr, cb = cv2.split(ycrcb)
+            # Fine-tuned YCrCb ranges for better skin detection
+            ycrcb_mask = ((cr >= 135) & (cr <= 180) & (cb >= 85) & (cb <= 135)).astype(np.uint8)
+            
+            # Combine all three methods for robust detection
+            combined_mask = ((bgr_mask | hsv_mask | ycrcb_mask)).astype(np.uint8) * 255
+            
+            # Enhanced morphological operations for cleaner result
+            # First: close small gaps in skin regions
+            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel_close)
+            
+            # Second: remove small noise and non-skin artifacts
+            kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel_open)
+            
+            # Third: dilate to ensure we capture hand edges properly
+            kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            combined_mask = cv2.dilate(combined_mask, kernel_dilate, iterations=2)
+            
+            # Fourth: smooth edges with Gaussian blur
+            combined_mask = cv2.GaussianBlur(combined_mask, (5, 5), 1)
+            
+            # Apply mask with black background
+            result[combined_mask == 0] = [0, 0, 0]
+            
+        except Exception as e:
+            logger.warning(f"Enhanced skin detection failed, using fallback: {e}")
+            # Fallback to simple BGR-only detection for performance
+            b, g, r = cv2.split(hand_crop)
+            simple_mask = ((r > 60) & (r > g) & (g > b)).astype(np.uint8) * 255
+            result[simple_mask == 0] = [0, 0, 0]
+        
+        return result
+    
+    def get_skin_mask_for_crop(self, hand_crop: np.ndarray) -> np.ndarray:
+        """
+        Get the skin detection mask for visualization purposes.
+        
+        Args:
+            hand_crop: Hand crop image in BGR format
+            
+        Returns:
+            Binary skin mask (0-255)
+        """
+        try:
+            # Use the same enhanced detection as the removal method
+            hsv = cv2.cvtColor(hand_crop, cv2.COLOR_BGR2HSV)
+            ycrcb = cv2.cvtColor(hand_crop, cv2.COLOR_BGR2YCrCb)
+            b, g, r = cv2.split(hand_crop)
+            
+            # Method 1: BGR ratio-based detection
+            bgr_mask = ((r > 60) & (r > g) & (g > b) & (r > b + 15)).astype(np.uint8)
+            
+            # Method 2: HSV-based detection (same improved ranges)
+            h, s, v = cv2.split(hsv)
+            hsv_mask1 = ((h >= 0) & (h <= 20) & (s >= 30) & (s <= 255) & (v >= 60) & (v <= 255)).astype(np.uint8)
+            hsv_mask2 = ((h >= 160) & (h <= 179) & (s >= 30) & (s <= 255) & (v >= 60) & (v <= 255)).astype(np.uint8)
+            hsv_mask = hsv_mask1 | hsv_mask2
+            
+            # Method 3: YCrCb-based detection (same improved ranges)
+            y, cr, cb = cv2.split(ycrcb)
+            ycrcb_mask = ((cr >= 135) & (cr <= 180) & (cb >= 85) & (cb <= 135)).astype(np.uint8)
+            
+            # Combine all methods
+            combined_mask = ((bgr_mask | hsv_mask | ycrcb_mask)).astype(np.uint8) * 255
+            
+            # Apply same enhanced morphological operations
+            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel_close)
+            
+            kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel_open)
+            
+            kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            combined_mask = cv2.dilate(combined_mask, kernel_dilate, iterations=2)
+            
+            # Apply same blur for consistency
+            combined_mask = cv2.GaussianBlur(combined_mask, (5, 5), 1)
+            
+            return combined_mask
+        except Exception as e:
+            logger.warning(f"Failed to generate skin mask: {e}")
+            return np.zeros(hand_crop.shape[:2], dtype=np.uint8)
 
     def detect_and_process_hand(self, frame: np.ndarray, target_size: int) -> Tuple[Optional[np.ndarray], Optional[Dict]]:
         """

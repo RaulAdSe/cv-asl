@@ -87,6 +87,12 @@ class LiveASLRecognizer:
         self.show_stats = True
         self.paused = False
         
+        # Performance optimization settings
+        self.frame_skip_counter = 0
+        self.frame_skip_rate = 1  # Process every N frames (1 = no skip, 2 = skip every other)
+        self.target_fps = 25      # Increased target FPS
+        self.last_process_time = 0
+        
         # --- State for paused display ---
         self.last_hand_info = None
         self.last_prediction = "Show Hand"
@@ -184,6 +190,16 @@ class LiveASLRecognizer:
             # Extract hand crop from original frame
             hand_crop = frame[y:y+h, x:x+w].copy()
             
+            # Get the background-removed version and skin mask for visualization
+            hand_crop_bg_removed = None
+            skin_mask_crop = None
+            if hasattr(self.hand_detector, '_remove_background_from_crop'):
+                try:
+                    hand_crop_bg_removed = self.hand_detector._remove_background_from_crop(hand_crop)
+                    skin_mask_crop = self.hand_detector.get_skin_mask_for_crop(hand_crop)
+                except Exception as e:
+                    logger.warning(f"Failed to get background-removed crop for visualization: {e}")
+            
             # Get model input tensor (224x224 normalized)
             model_input = processed_hand
             if isinstance(model_input, torch.Tensor):
@@ -201,8 +217,8 @@ class LiveASLRecognizer:
                 model_input_np = model_input
             
             # Create comprehensive visualization
-            fig = plt.figure(figsize=(16, 12))
-            gs = GridSpec(3, 4, figure=fig, hspace=0.3, wspace=0.3)
+            fig = plt.figure(figsize=(18, 14))
+            gs = GridSpec(4, 4, figure=fig, hspace=0.3, wspace=0.3)
             
             fig.suptitle(f'Live ASL Data Analysis - Prediction: {prediction} ({confidence:.3f})', 
                         fontsize=16, fontweight='bold')
@@ -210,17 +226,28 @@ class LiveASLRecognizer:
             # Panel 1: Original hand crop
             ax1 = fig.add_subplot(gs[0, 0])
             ax1.imshow(cv2.cvtColor(hand_crop, cv2.COLOR_BGR2RGB))
-            ax1.set_title(f'Original Hand Crop\n{w}×{h} pixels')
+            ax1.set_title(f'1. Original Hand Crop\n{w}×{h} pixels')
             ax1.axis('off')
             
-            # Panel 2: Model input (224x224 preprocessed)
+            # Panel 2: Background removed crop
             ax2 = fig.add_subplot(gs[0, 1])
-            ax2.imshow(model_input_np)
-            ax2.set_title(f'Model Input\n224×224 preprocessed')
+            if hand_crop_bg_removed is not None:
+                ax2.imshow(cv2.cvtColor(hand_crop_bg_removed, cv2.COLOR_BGR2RGB))
+                ax2.set_title(f'2. Background Removed\n{hand_crop_bg_removed.shape[1]}×{hand_crop_bg_removed.shape[0]} pixels')
+            else:
+                ax2.text(0.5, 0.5, 'Background removal\nfailed', ha='center', va='center',
+                        transform=ax2.transAxes, fontsize=12)
+                ax2.set_title('2. Background Removed\n(Failed)')
             ax2.axis('off')
             
-            # Panel 3: Prediction confidence visualization
+            # Panel 3: Model input (224x224 preprocessed)
             ax3 = fig.add_subplot(gs[0, 2])
+            ax3.imshow(model_input_np)
+            ax3.set_title(f'3. Model Input\n224×224 final')
+            ax3.axis('off')
+            
+            # Panel 4: Prediction confidence visualization
+            ax4 = fig.add_subplot(gs[0, 3])
             if hasattr(self.model, 'class_map') and self.model.class_map:
                 classes = list(self.model.class_map.keys())
                 # Create a mock prediction distribution (in real scenario, you'd get this from model output)
@@ -234,25 +261,25 @@ class LiveASLRecognizer:
                         if i != pred_idx:
                             probs[i] = remaining
                 
-                bars = ax3.bar(classes, probs, color=['red' if p == confidence else 'gray' for p in probs])
-                ax3.set_title('Prediction Confidence')
-                ax3.set_ylabel('Probability')
-                ax3.set_ylim(0, 1)
+                bars = ax4.bar(classes, probs, color=['red' if p == confidence else 'gray' for p in probs])
+                ax4.set_title('4. Prediction Confidence')
+                ax4.set_ylabel('Probability')
+                ax4.set_ylim(0, 1)
                 
                 # Highlight the predicted class
                 for i, (bar, prob) in enumerate(zip(bars, probs)):
                     if prob == confidence:
                         bar.set_color('green')
-                        ax3.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
+                        ax4.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
                                f'{prob:.3f}', ha='center', va='bottom', fontweight='bold')
             else:
-                ax3.text(0.5, 0.5, 'No class info\navailable', ha='center', va='center', 
-                        transform=ax3.transAxes)
-                ax3.set_title('Prediction Confidence')
+                ax4.text(0.5, 0.5, 'No class info\navailable', ha='center', va='center', 
+                        transform=ax4.transAxes)
+                ax4.set_title('4. Prediction Confidence')
             
-            # Panel 4: Hand information
-            ax4 = fig.add_subplot(gs[0, 3])
-            ax4.axis('off')
+            # Panel 5: Hand information
+            ax5 = fig.add_subplot(gs[1, 0])
+            ax5.axis('off')
             
             total_pixels = w * h
             aspect_ratio = w / h if h > 0 else 1.0
@@ -278,79 +305,188 @@ Tracker: {'Active' if hand_info.get('tracking', False) else 'Inactive'}
 Frame: {hand_info.get('frame_count', 'N/A')}
 """
             
-            ax4.text(0.05, 0.95, info_text, transform=ax4.transAxes, 
+            ax5.text(0.05, 0.95, info_text, transform=ax5.transAxes, 
                     fontsize=10, verticalalignment='top', fontfamily='monospace')
             
-            # Panel 5: Full frame context
-            ax5 = fig.add_subplot(gs[1, :2])
+            # Panel 6: Full frame context
+            ax6 = fig.add_subplot(gs[1, 1:3])
             frame_display = frame.copy()
             # Draw hand bbox
             cv2.rectangle(frame_display, (x, y), (x+w, y+h), (0, 255, 0), 3)
             cv2.putText(frame_display, f'{prediction}: {confidence:.3f}', (x, y-10), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             
-            ax5.imshow(cv2.cvtColor(frame_display, cv2.COLOR_BGR2RGB))
-            ax5.set_title('Live Camera Feed with Detection')
-            ax5.axis('off')
+            ax6.imshow(cv2.cvtColor(frame_display, cv2.COLOR_BGR2RGB))
+            ax6.set_title('6. Live Camera Feed with Detection')
+            ax6.axis('off')
             
-            # Panel 6: Model preprocessing visualization
-            ax6 = fig.add_subplot(gs[1, 2:])
+            # Panel 7: Model preprocessing visualization
+            ax7 = fig.add_subplot(gs[1, 3])
             
             # Show the preprocessing steps if we can recreate them
             preprocessing_steps = [
-                "1. Hand Detection & Cropping",
-                "2. Resize to 224×224",
-                "3. Convert to Tensor", 
-                "4. Normalize (ImageNet)",
-                "5. Add Batch Dimension",
+                "1. Hand Detection",
+                "2. Crop Hand",
+                "3. Remove Background", 
+                "4. Resize to 224×224",
+                "5. Normalize (ImageNet)",
                 "6. Send to Model"
             ]
             
             for i, step in enumerate(preprocessing_steps):
                 color = 'green' if i < 6 else 'gray'
-                ax6.text(0.05, 0.9 - i*0.12, f"✓ {step}", transform=ax6.transAxes,
-                        fontsize=11, color=color, fontweight='bold')
+                ax7.text(0.05, 0.9 - i*0.12, f"✓ {step}", transform=ax7.transAxes,
+                        fontsize=9, color=color, fontweight='bold')
             
-            ax6.text(0.05, 0.2, f"Model Device: {self.device}\nModel Type: MobileNetV2\nClasses: {len(self.classes)}", 
-                    transform=ax6.transAxes, fontsize=10, fontfamily='monospace')
-            ax6.set_title('DL Pipeline Status')
-            ax6.axis('off')
+            ax7.text(0.05, 0.2, f"Device: {self.device}\nMobileNetV2\n{len(self.classes)} classes", 
+                    transform=ax7.transAxes, fontsize=8, fontfamily='monospace')
+            ax7.set_title('7. DL Pipeline')
+            ax7.axis('off')
             
-            # Panel 7: Color histogram
-            ax7 = fig.add_subplot(gs[2, 0])
-            if len(hand_crop.shape) == 3:
+            # Panel 8: Original vs Background-removed comparison histogram
+            ax8 = fig.add_subplot(gs[2, 0])
+            
+            # Show comparison of original vs background-removed
+            if hand_crop_bg_removed is not None and len(hand_crop_bg_removed.shape) == 3:
+                # Original crop histogram (full)
+                orig_hist_r = cv2.calcHist([hand_crop], [2], None, [256], [0, 256])
+                bg_mask = np.any(hand_crop_bg_removed > 5, axis=2)
+                
+                if np.any(bg_mask):
+                    # Background-removed histogram (skin only)
+                    bg_hist_r = cv2.calcHist([hand_crop_bg_removed], [2], bg_mask.astype(np.uint8), [256], [0, 256])
+                    
+                    # Normalize for comparison
+                    orig_hist_r = orig_hist_r / np.sum(orig_hist_r)
+                    bg_hist_r = bg_hist_r / np.sum(bg_hist_r)
+                    
+                    ax8.plot(orig_hist_r, color='orange', alpha=0.7, label='Original', linewidth=2)
+                    ax8.plot(bg_hist_r, color='red', alpha=0.7, label='BG Removed', linewidth=2)
+                    
+                    ax8.set_title('8. Red Channel Comparison')
+                    ax8.set_xlabel('Pixel Intensity')
+                    ax8.set_ylabel('Normalized Frequency')
+                    ax8.legend()
+                    
+                    # Add skin percentage
+                    skin_percentage = np.sum(bg_mask) / bg_mask.size * 100
+                    ax8.text(0.02, 0.98, f'Skin: {skin_percentage:.1f}%',
+                            transform=ax8.transAxes, fontsize=8, verticalalignment='top',
+                            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+                else:
+                    ax8.text(0.5, 0.5, 'No skin pixels\ndetected', ha='center', va='center',
+                            transform=ax8.transAxes)
+                    ax8.set_title('8. Red Channel Comparison')
+            else:
+                ax8.text(0.5, 0.5, 'Background removal\nfailed', ha='center', va='center',
+                        transform=ax8.transAxes)
+                ax8.set_title('8. Red Channel Comparison')
+            
+            # Panel 9: Background removed histogram (excluding black background)
+            ax9 = fig.add_subplot(gs[2, 1])
+            if hand_crop_bg_removed is not None and len(hand_crop_bg_removed.shape) == 3:
+                # Create mask to exclude black background pixels
+                bg_mask = np.any(hand_crop_bg_removed > 5, axis=2)  # Exclude near-black pixels
+                
+                if np.any(bg_mask):  # Only if there are non-background pixels
+                    for i, color in enumerate(['blue', 'green', 'red']):
+                        # Only calculate histogram for skin pixels (exclude background)
+                        hist = cv2.calcHist([hand_crop_bg_removed], [i], bg_mask.astype(np.uint8), [256], [0, 256])
+                        ax9.plot(hist, color=color, alpha=0.7, label=f'{color.upper()}')
+                    ax9.set_title('9. BG Removed Histogram\n(Skin pixels only)')
+                    ax9.set_xlabel('Pixel Intensity')
+                    ax9.set_ylabel('Frequency')
+                    ax9.legend()
+                else:
+                    ax9.text(0.5, 0.5, 'No skin pixels\ndetected', ha='center', va='center',
+                            transform=ax9.transAxes)
+                    ax9.set_title('9. BG Removed Histogram')
+            else:
+                ax9.text(0.5, 0.5, 'Background removal\nfailed', ha='center', va='center',
+                        transform=ax9.transAxes)
+                ax9.set_title('9. BG Removed Histogram')
+            
+            # Panel 10: Model input histogram (normalized space)
+            ax10 = fig.add_subplot(gs[2, 2])
+            
+            # Show histogram in the actual normalized range the model sees
+            if isinstance(processed_hand, torch.Tensor):
+                # Use the actual tensor data (normalized)
+                tensor_data = processed_hand.cpu().numpy()
+                if len(tensor_data.shape) == 4:
+                    tensor_data = tensor_data[0]  # Remove batch dimension
+                
+                # Transpose from CHW to HWC for histogram calculation
+                tensor_data = tensor_data.transpose(1, 2, 0)
+                
+                for i, color in enumerate(['blue', 'green', 'red']):
+                    channel_data = tensor_data[:, :, i].flatten()
+                    # Create histogram manually for normalized data
+                    hist, bins = np.histogram(channel_data, bins=50, range=(-3, 3))
+                    bin_centers = (bins[:-1] + bins[1:]) / 2
+                    ax10.plot(bin_centers, hist, color=color, alpha=0.7, label=f'{color.upper()}', linewidth=2)
+                
+                ax10.set_title('10. Model Input Distribution\n(ImageNet Normalized)')
+                ax10.set_xlabel('Normalized Value')
+                ax10.set_ylabel('Frequency')
+                ax10.legend()
+                ax10.grid(True, alpha=0.3)
+                
+                # Add normalization info
+                mean_vals = [np.mean(tensor_data[:,:,i]) for i in range(3)]
+                std_vals = [np.std(tensor_data[:,:,i]) for i in range(3)]
+                ax10.text(0.02, 0.98, f'Mean: B={mean_vals[0]:.2f}, G={mean_vals[1]:.2f}, R={mean_vals[2]:.2f}\nStd:  B={std_vals[0]:.2f}, G={std_vals[1]:.2f}, R={std_vals[2]:.2f}',
+                         transform=ax10.transAxes, fontsize=8, verticalalignment='top',
+                         bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+                
+                # Add expected ranges
+                ax10.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
+                ax10.text(0.02, 0.02, 'ImageNet norm:\nμ=[0.485,0.456,0.406]\nσ=[0.229,0.224,0.225]',
+                         transform=ax10.transAxes, fontsize=7, verticalalignment='bottom',
+                         bbox=dict(boxstyle='round,pad=0.3', facecolor='lightgray', alpha=0.8))
+            elif len(model_input_np.shape) == 3:
+                # Fallback: show the pre-background-removal crop histogram instead
                 for i, color in enumerate(['blue', 'green', 'red']):
                     hist = cv2.calcHist([hand_crop], [i], None, [256], [0, 256])
-                    ax7.plot(hist, color=color, alpha=0.7, label=f'{color.upper()}')
-                ax7.set_title('Color Histogram')
-                ax7.set_xlabel('Pixel Intensity')
-                ax7.set_ylabel('Frequency')
-                ax7.legend()
+                    ax10.plot(hist, color=color, alpha=0.7, label=f'{color.upper()}')
+                ax10.set_title('10. Original Crop Histogram\n(Pre-processing)')
+                ax10.set_xlabel('Pixel Intensity (0-255)')
+                ax10.set_ylabel('Frequency')
+                ax10.legend()
             else:
-                ax7.text(0.5, 0.5, 'Grayscale\nimage', ha='center', va='center',
-                        transform=ax7.transAxes)
-                ax7.set_title('Color Histogram')
+                ax10.text(0.5, 0.5, 'Model input\nnot available', ha='center', va='center',
+                         transform=ax10.transAxes)
+                ax10.set_title('10. Model Input Histogram')
             
-            # Panel 8: Model input histogram
-            ax8 = fig.add_subplot(gs[2, 1])
-            if len(model_input_np.shape) == 3:
-                for i, color in enumerate(['blue', 'green', 'red']):
-                    hist = cv2.calcHist([model_input_np], [i], None, [256], [0, 256])
-                    ax8.plot(hist, color=color, alpha=0.7, label=f'{color.upper()}')
-                ax8.set_title('Model Input Histogram')
-                ax8.set_xlabel('Pixel Intensity')
-                ax8.set_ylabel('Frequency')
-                ax8.legend()
+            # Panel 11: Skin mask visualization
+            ax11 = fig.add_subplot(gs[2, 3])
+            if skin_mask_crop is not None:
+                ax11.imshow(skin_mask_crop, cmap='Reds')
+                ax11.set_title('11. Skin Detection Mask')
+                
+                # Add mask statistics
+                mask_percentage = np.sum(skin_mask_crop > 0) / skin_mask_crop.size * 100
+                mask_mean = np.mean(skin_mask_crop[skin_mask_crop > 0]) if np.any(skin_mask_crop > 0) else 0
+                
+                ax11.text(0.02, 0.98, f'Coverage: {mask_percentage:.1f}%\nMean: {mask_mean:.1f}',
+                         transform=ax11.transAxes, fontsize=8, verticalalignment='top',
+                         bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+            else:
+                ax11.text(0.5, 0.5, 'Skin mask\nnot available', ha='center', va='center',
+                        transform=ax11.transAxes)
+                ax11.set_title('11. Skin Detection Mask')
+            ax11.axis('off')
             
-            # Panel 9: Background learning status
-            ax9 = fig.add_subplot(gs[2, 2])
-            ax9.axis('off')
+            # Panel 12: Vision system status
+            ax12 = fig.add_subplot(gs[3, 0])
+            ax12.axis('off')
             
             bg_progress = self.hand_detector.bg_remover.get_progress()
             bg_learned = self.hand_detector.bg_remover.bg_model_learned
             
-            bg_text = f"""Background Learning:
+            vision_text = f"""Vision System:
 
+Background Learning:
 Status: {'✅ Learned' if bg_learned else '🔄 Learning'}
 Progress: {bg_progress:.1%}
 
@@ -364,16 +500,16 @@ Hand Tracking:
 - Smoothing: Enabled
 """
             
-            ax9.text(0.05, 0.95, bg_text, transform=ax9.transAxes,
-                     fontsize=9, verticalalignment='top', fontfamily='monospace')
-            ax9.set_title('Vision System Status')
+            ax12.text(0.05, 0.95, vision_text, transform=ax12.transAxes,
+                     fontsize=8, verticalalignment='top', fontfamily='monospace')
+            ax12.set_title('12. Vision System')
             
-            # Panel 10: System performance
-            ax10 = fig.add_subplot(gs[2, 3])
-            ax10.axis('off')
+            # Panel 13: System performance
+            ax13 = fig.add_subplot(gs[3, 1])
+            ax13.axis('off')
             
             fps = self.fps_tracker.get_fps()
-            performance_text = f"""System Performance:
+            performance_text = f"""Performance:
 
 FPS: {fps:.1f}
 Device: {self.device}
@@ -388,9 +524,57 @@ Frame: {frame.nbytes / 1024 / 1024:.1f} MB
 Status: {'🟢 Real-time' if fps > 15 else '🟡 Slow' if fps > 10 else '🔴 Too slow'}
 """
             
-            ax10.text(0.05, 0.95, performance_text, transform=ax10.transAxes,
-                     fontsize=9, verticalalignment='top', fontfamily='monospace')
-            ax10.set_title('Performance Metrics')
+            ax13.text(0.05, 0.95, performance_text, transform=ax13.transAxes,
+                     fontsize=8, verticalalignment='top', fontfamily='monospace')
+            ax13.set_title('13. Performance')
+            
+            # Panel 14: Color space analysis
+            ax14 = fig.add_subplot(gs[3, 2:4])
+            ax14.axis('off')
+            
+            if hand_crop_bg_removed is not None and len(hand_crop_bg_removed.shape) == 3:
+                bg_mask = np.any(hand_crop_bg_removed > 5, axis=2)
+                if np.any(bg_mask):
+                    # Analyze skin color distribution
+                    skin_pixels = hand_crop_bg_removed[bg_mask]
+                    
+                    # BGR analysis
+                    bgr_mean = np.mean(skin_pixels, axis=0)
+                    bgr_std = np.std(skin_pixels, axis=0)
+                    
+                    # HSV analysis
+                    hsv_crop = cv2.cvtColor(hand_crop_bg_removed, cv2.COLOR_BGR2HSV)
+                    hsv_skin = hsv_crop[bg_mask]
+                    hsv_mean = np.mean(hsv_skin, axis=0)
+                    hsv_std = np.std(hsv_skin, axis=0)
+                    
+                    color_analysis = f"""Color Analysis (Skin Only):
+
+BGR Values:
+- Blue:  {bgr_mean[0]:.1f} ± {bgr_std[0]:.1f}
+- Green: {bgr_mean[1]:.1f} ± {bgr_std[1]:.1f}  
+- Red:   {bgr_mean[2]:.1f} ± {bgr_std[2]:.1f}
+
+HSV Values:
+- Hue:        {hsv_mean[0]:.1f}° ± {hsv_std[0]:.1f}°
+- Saturation: {hsv_mean[1]:.1f} ± {hsv_std[1]:.1f}
+- Value:      {hsv_mean[2]:.1f} ± {hsv_std[2]:.1f}
+
+Skin Quality:
+- Uniformity: {'Good' if np.mean(bgr_std) < 30 else 'Variable'}
+- Total Pixels: {len(skin_pixels):,}
+"""
+                    
+                    ax14.text(0.05, 0.95, color_analysis, transform=ax14.transAxes,
+                             fontsize=8, verticalalignment='top', fontfamily='monospace')
+                else:
+                    ax14.text(0.5, 0.5, 'No skin pixels detected', ha='center', va='center',
+                             transform=ax14.transAxes)
+            else:
+                ax14.text(0.5, 0.5, 'Background removal failed', ha='center', va='center',
+                         transform=ax14.transAxes)
+            
+            ax14.set_title('14. Color Space Analysis')
             
             plt.tight_layout()
             plt.show(block=False)  # Non-blocking
@@ -404,6 +588,10 @@ Status: {'🟢 Real-time' if fps > 15 else '🟡 Slow' if fps > 10 else '🔴 To
             
             # Save images
             cv2.imwrite(f"{capture_base}_original.jpg", hand_crop)
+            if hand_crop_bg_removed is not None:
+                cv2.imwrite(f"{capture_base}_bg_removed.jpg", hand_crop_bg_removed)
+            if skin_mask_crop is not None:
+                cv2.imwrite(f"{capture_base}_skin_mask.jpg", skin_mask_crop)
             cv2.imwrite(f"{capture_base}_model_input.jpg", model_input_np)
             cv2.imwrite(f"{capture_base}_full_frame.jpg", frame)
             
@@ -430,6 +618,8 @@ Status: {'🟢 Real-time' if fps > 15 else '🟡 Slow' if fps > 10 else '🔴 To
                 },
                 'files': {
                     'original_crop': f"{capture_base.name}_original.jpg",
+                    'bg_removed_crop': f"{capture_base.name}_bg_removed.jpg" if hand_crop_bg_removed is not None else None,
+                    'skin_mask': f"{capture_base.name}_skin_mask.jpg" if skin_mask_crop is not None else None,
                     'model_input': f"{capture_base.name}_model_input.jpg",
                     'full_frame': f"{capture_base.name}_full_frame.jpg"
                 }
@@ -456,11 +646,30 @@ Status: {'🟢 Real-time' if fps > 15 else '🟡 Slow' if fps > 10 else '🔴 To
         tracking, and prediction. It updates the recognizer's state but
         does not draw to the screen.
         """
+        current_time = time.time()
+        
         # --- Background Learning Phase ---
         if not self.hand_detector.bg_remover.bg_model_learned:
             self.hand_detector.bg_remover.learn_background(frame)
             # State is updated, UI will be drawn in the main loop
             return
+
+        # --- Performance optimization: Adaptive frame skipping ---
+        # Skip frames if we're processing too slowly
+        frame_interval = current_time - self.last_process_time
+        min_frame_time = 1.0 / self.target_fps
+        
+        # Increment frame skip counter
+        self.frame_skip_counter += 1
+        
+        # Skip frames based on performance
+        if frame_interval < min_frame_time or self.frame_skip_counter % self.frame_skip_rate != 0:
+            # Just update FPS tracker and store frame for UI
+            self.fps_tracker.update()
+            self.last_capture_frame = frame.copy()
+            return
+        
+        self.last_process_time = current_time
 
         # --- Normal Processing ---
         self.fps_tracker.update()
@@ -521,10 +730,18 @@ Status: {'🟢 Real-time' if fps > 15 else '🟡 Slow' if fps > 10 else '🔴 To
         pred_text = f"Prediction: {prediction} ({confidence:.2f})"
         cv2.putText(frame, pred_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         
-        # Draw FPS
+        # Draw FPS and performance stats
         if self.show_stats:
             fps = self.fps_tracker.get_fps()
-            cv2.putText(frame, f"FPS: {fps:.2f}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            cv2.putText(frame, f"FPS: {fps:.1f}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            
+            # Show frame skip rate for performance monitoring
+            cv2.putText(frame, f"Skip Rate: 1/{self.frame_skip_rate}", (10, 110), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            
+            # Show target FPS
+            cv2.putText(frame, f"Target: {self.target_fps} FPS", (10, 140), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
             
         # --- PAUSED indicator ---
         if self.paused:
@@ -562,10 +779,28 @@ Status: {'🟢 Real-time' if fps > 15 else '🟡 Slow' if fps > 10 else '🔴 To
                 )
             else:
                 logger.warning("❌ No hand data available to capture")
+        elif key == ord('+') or key == ord('='):
+            # Increase frame skip rate (lower performance, higher quality)
+            self.frame_skip_rate = max(1, self.frame_skip_rate - 1)
+            logger.info(f"⚡ Frame skip rate: 1/{self.frame_skip_rate} (Higher quality)")
+        elif key == ord('-'):
+            # Decrease frame skip rate (higher performance, lower quality)
+            self.frame_skip_rate = min(5, self.frame_skip_rate + 1)
+            logger.info(f"🚀 Frame skip rate: 1/{self.frame_skip_rate} (Higher performance)")
+        elif key == ord('p'):
+            # Toggle performance mode
+            if self.frame_skip_rate == 1:
+                self.frame_skip_rate = 2
+                self.target_fps = 30
+                logger.info("🚀 Performance mode: ON (Skip every 2nd frame, target 30 FPS)")
+            else:
+                self.frame_skip_rate = 1
+                self.target_fps = 25
+                logger.info("🎯 Quality mode: ON (Process all frames, target 25 FPS)")
 
     def run(self):
         """Main loop for the application."""
-        logger.info("🟢 Starting Live ASL Recognition with Data Capture...")
+        logger.info("🟢 Starting Live ASL Recognition with Performance Optimizations...")
         logger.info("📋 Controls:")
         logger.info("  Q: Quit")
         logger.info("  S: Toggle statistics display")
@@ -573,12 +808,24 @@ Status: {'🟢 Real-time' if fps > 15 else '🟡 Slow' if fps > 10 else '🔴 To
         logger.info("  B: Reset background learning")
         logger.info("  SPACE: Pause/unpause")
         logger.info("  C: 📸 Capture and visualize hand data")
+        logger.info("  P: Toggle performance mode (skip frames for higher FPS)")
+        logger.info("  +/-: Adjust frame skip rate manually")
         logger.info("")
         
         self.cap = cv2.VideoCapture(self.camera_index)
         if not self.cap.isOpened():
             logger.error(f"❌ Cannot open camera {self.camera_index}")
             return
+            
+        # Optimize camera settings for performance
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer to minimize lag
+        self.cap.set(cv2.CAP_PROP_FPS, 30)        # Set camera FPS
+        
+        # Get actual camera resolution for info
+        actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+        logger.info(f"📹 Camera: {actual_width}x{actual_height} @ {actual_fps:.1f} FPS")
             
         while self.cap.isOpened():
             key = cv2.waitKey(1) & 0xFF
