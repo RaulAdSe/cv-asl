@@ -82,11 +82,12 @@ class ASLHandDetector:
         hand_crop = frame[crop_y1:crop_y2, crop_x1:crop_x2]
         if hand_crop.size == 0: return None
         
-        # Pass the crop coordinates along with the hand crop
+        # Apply background removal first, then resize to model input size
+        # This is what the user wants: Background Removal → Resize → Model Input
         crop_coords = (crop_x1, crop_y1, crop_x2, crop_y2)
         hand_crop_bg_removed = self._remove_background_from_crop(hand_crop, crop_coords)
         
-        # Resize to square
+        # Now just resize the background-removed image (no additional filters!)
         resized = cv2.resize(hand_crop_bg_removed, (target_size, target_size), interpolation=cv2.INTER_AREA)
         
         return resized
