@@ -39,6 +39,7 @@ class BackgroundRemover:
         self.bg_model_learned = False
         self.frames_learned = 0
         self.history = history
+        self.background_image: Optional[np.ndarray] = None
 
         # Kernels for cleaning up the foreground mask
         self.open_kernel = np.ones((5, 5), np.uint8)
@@ -64,7 +65,9 @@ class BackgroundRemover:
         # Consider the model learned after enough frames
         if self.frames_learned >= self.history:
             self.bg_model_learned = True
-            logger.info("✅ Background model has been learned.")
+            # CRITICAL: Capture the learned background image
+            self.background_image = self.bg_subtractor.getBackgroundImage()
+            logger.info("✅ Background model learned and static background image captured.")
 
     def get_progress(self) -> float:
         """Returns the background learning progress as a percentage."""
@@ -118,4 +121,5 @@ class BackgroundRemover:
     def reset(self):
         """Resets the background model."""
         self.__init__(learning_rate=self.learning_rate, history=self.history, threshold=self.bg_subtractor.getVarThreshold())
+        self.background_image = None # Reset the captured image
         logger.info("BackgroundRemover has been reset.") 
