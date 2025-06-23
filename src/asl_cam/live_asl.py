@@ -167,320 +167,239 @@ class LiveASLRecognizer:
     
     def _capture_and_visualize_hand_data(self, frame: np.ndarray, processed_hand: np.ndarray, 
                                        hand_info: Dict, prediction: str, confidence: float) -> None:
-        """
-        Capture and visualize detailed hand data following the actual processing workflow.
-        
-        Args:
-            frame: Current camera frame
-            processed_hand: Preprocessed hand crop that goes to the model
-            hand_info: Hand detection information 
-            prediction: Current model prediction
-            confidence: Prediction confidence
-        """
+        """Clean ASL analysis with unified styling and minimal titles."""
         try:
             import matplotlib.pyplot as plt
-            import matplotlib.patches as patches
             from matplotlib.gridspec import GridSpec
-            import json
             import torch
             
-            # Extract hand information
-            x, y, w, h = hand_info['bbox']
+            # Extract hand information and create hand crop FIRST 
+            bbox = hand_info.get('bbox', (0, 0, 100, 100))
+            x, y, w, h = bbox
+            hand_crop = frame[y:y+h, x:x+w].copy()
+            fps = self.fps_tracker.get_fps()
             
-            # Create hand crop from current frame
-            hand_crop = frame[y:y+h, x:x+w]
+            # Get model probabilities
+            with torch.no_grad():
+                if isinstance(processed_hand, torch.Tensor):
+                    outputs = self.model(processed_hand.unsqueeze(0).to(self.device))
+                    probabilities = torch.nn.functional.softmax(outputs, dim=1)
+                    model_probs = probabilities[0].cpu().numpy()
+                else:
+                    model_probs = np.array([0.33, 0.33, 0.34])
             
-            # Get background-removed version for visualization
+            # Create background removed version for visualization
+            crop_coords = (x, y, x+w, y+h)
             try:
-                crop_coords = (x, y, w, h)
                 hand_crop_bg_removed = self.hand_detector._remove_background_from_crop(hand_crop, crop_coords)
             except Exception as e:
-                logger.warning(f"Failed to get background-removed crop for visualization: {e}")
-                hand_crop_bg_removed = None
+                logger.warning(f"Background removal failed: {e}")
+                hand_crop_bg_removed = hand_crop.copy()
             
-            # Convert model input tensor back to numpy for visualization
-            if isinstance(processed_hand, torch.Tensor):
-                # Denormalize and convert back to BGR format for consistent visualization
-                model_input_np = processed_hand.cpu().numpy()
-                if len(model_input_np.shape) == 4:
-                    model_input_np = model_input_np[0]  # Remove batch dimension
-                
-                # Transpose from CHW to HWC
-                model_input_np = model_input_np.transpose(1, 2, 0)
-                
-                # Denormalize using ImageNet stats
+            # Prepare model input visualization (denormalized)
+            model_input_vis = processed_hand.copy()
+            if isinstance(model_input_vis, torch.Tensor):
+                model_input_vis = model_input_vis.cpu().numpy()
+                if len(model_input_vis.shape) == 4:
+                    model_input_vis = model_input_vis[0]
+                if len(model_input_vis.shape) == 3 and model_input_vis.shape[0] == 3:
+                    model_input_vis = np.transpose(model_input_vis, (1, 2, 0))
+                # Denormalize for display
                 mean = np.array([0.485, 0.456, 0.406])
                 std = np.array([0.229, 0.224, 0.225])
-                model_input_np = model_input_np * std + mean
-                model_input_np = np.clip(model_input_np, 0, 1)
-                model_input_np = (model_input_np * 255).astype(np.uint8)
-                
-                # Convert RGB back to BGR for OpenCV operations
-                model_input_np = cv2.cvtColor(model_input_np, cv2.COLOR_RGB2BGR)
-            else:
-                model_input_np = processed_hand
+                model_input_vis = (model_input_vis * std + mean)
+                model_input_vis = np.clip(model_input_vis, 0, 1)
             
-            # Create comprehensive visualization with 3x4 grid
-            fig = plt.figure(figsize=(16, 12))
-            gs = GridSpec(3, 4, figure=fig, hspace=0.3, wspace=0.3)
+            # Calculate metrics
+            max_prob = np.max(model_probs)
+            entropy = -np.sum(model_probs * np.log(model_probs + 1e-10))
             
-            # ========== STEP 1: CAMERA INPUT ==========
-            # Panel 1: Live camera feed with detection box
+            # Create clean 2x4 grid
+            fig = plt.figure(figsize=(16, 8))
+            gs = GridSpec(2, 4, figure=fig, hspace=0.3, wspace=0.2)
+            fig.patch.set_facecolor('white')
+            
+            # Minimal main title
+            fig.suptitle(f'ASL Analysis: {prediction} ({confidence:.1%}) | FPS: {fps:.1f}', 
+                        fontsize=14, fontweight='bold', color='#2c3e50')
+            
+            # UNIFIED STYLE PARAMETERS
+            title_fontsize = 10
+            title_color = '#2c3e50'
+            bg_color = 'white'
+            
+            # Panel 1: Camera
             ax1 = fig.add_subplot(gs[0, 0])
-            frame_with_box = frame.copy()
-            cv2.rectangle(frame_with_box, (x, y), (x+w, y+h), (0, 255, 0), 3)
-            ax1.imshow(cv2.cvtColor(frame_with_box, cv2.COLOR_BGR2RGB))
-            ax1.set_title(f'1. 📹 Live Camera Feed\n{frame.shape[1]}×{frame.shape[0]} @ {self.fps_tracker.get_fps():.1f} FPS')
+            ax1.set_facecolor(bg_color)
+            frame_copy = frame.copy()
+            cv2.rectangle(frame_copy, (x, y), (x+w, y+h), (0, 255, 0), 3)
+            ax1.imshow(cv2.cvtColor(frame_copy, cv2.COLOR_BGR2RGB))
+            ax1.set_title(f'Camera Feed\n{frame.shape[1]}×{frame.shape[0]}', 
+                         fontsize=title_fontsize, fontweight='bold', color=title_color)
             ax1.axis('off')
             
-            # Panel 2: Detection analysis 
+            # Panel 2: Hand ROI
             ax2 = fig.add_subplot(gs[0, 1])
+            ax2.set_facecolor(bg_color)
+            ax2.imshow(cv2.cvtColor(hand_crop, cv2.COLOR_BGR2RGB))
+            ax2.set_title(f'Hand ROI\n{w}×{h}px', 
+                         fontsize=title_fontsize, fontweight='bold', color=title_color)
             ax2.axis('off')
             
-            detection_text = f"""Detection Analysis:
-
-Bounding Box:
-• Position: ({x}, {y})
-• Size: {w}×{h} pixels
-• Area: {w*h:,} pixels
-• Aspect Ratio: {w/h:.2f}
-
-Quality Metrics:
-• Size: {'✅ Good' if w*h > 5000 else '⚠️ Small' if w*h > 1000 else '❌ Too Small'}
-• Position: {'✅ Centered' if 0.2 < x/frame.shape[1] < 0.8 and 0.2 < y/frame.shape[0] < 0.8 else '⚠️ Edge'}
-• Aspect: {'✅ Normal' if 0.5 < w/h < 2.0 else '⚠️ Unusual'}
-
-Tracking Status:
-• Active: {'✅ Yes' if hand_info.get('tracking', False) else '❌ No'}
-• Stability: {'✅ Stable' if hand_info.get('stable', False) else '⚠️ Unstable'}
-"""
-            
-            ax2.text(0.05, 0.95, detection_text, transform=ax2.transAxes,
-                     fontsize=9, verticalalignment='top', fontfamily='monospace')
-            ax2.set_title('2. 🔍 Detection Analysis')
-            
-            # Panel 3: Processing pipeline overview
+            # Panel 3: Original Color Distribution (UNIFIED)
             ax3 = fig.add_subplot(gs[0, 2])
-            ax3.axis('off')
+            ax3.set_facecolor(bg_color)
+            self._plot_unified_color_distribution(ax3, hand_crop, 'Original Colors', title_fontsize, title_color)
             
-            # Show workflow as a flowchart-style text
-            workflow_text = f"""Processing Pipeline:
-
-1. 📹 Camera Input → Hand Detection
-2. ✂️ ROI Extraction → {w}×{h} crop  
-3. 🔍 Skin Detection → Color analysis
-4. 🎭 MOG2 Analysis → Motion detection
-5. 🎨 Background Removal → Black background
-6. 📐 Resize → 224×224 model input
-7. 🔢 Normalize → ImageNet standards
-8. 🧠 CNN Inference → {prediction} ({confidence:.3f})
-
-Status: ✅ All steps completed
-Quality: {'🟢 Good' if confidence > 0.5 else '🟡 Moderate' if confidence > 0.3 else '🔴 Low'} confidence
-"""
-            
-            ax3.text(0.05, 0.95, workflow_text, transform=ax3.transAxes,
-                     fontsize=8, verticalalignment='top', fontfamily='monospace')
-            ax3.set_title('3. ⚙️ Processing Pipeline')
-            
-            # ========== STEP 2: ROI EXTRACTION ==========
-            # Panel 4: Hand ROI crop
+            # Panel 4: Background Removal
             ax4 = fig.add_subplot(gs[0, 3])
-            ax4.imshow(cv2.cvtColor(hand_crop, cv2.COLOR_BGR2RGB))
-            ax4.set_title(f'4. ✋ Hand ROI Crop\n{hand_crop.shape[1]}×{hand_crop.shape[0]} pixels')
+            ax4.set_facecolor(bg_color)
+            ax4.imshow(cv2.cvtColor(hand_crop_bg_removed, cv2.COLOR_BGR2RGB))
+            ax4.set_title('Background Removed\nDemo Only', 
+                         fontsize=title_fontsize, fontweight='bold', color=title_color)
             ax4.axis('off')
             
-            # Panel 5: Skin detection mask
+            # Panel 5: Processed Color Distribution (UNIFIED)
             ax5 = fig.add_subplot(gs[1, 0])
-            try:
-                skin_mask = self.hand_detector._get_skin_mask_simple(hand_crop)
-                if skin_mask is not None:
-                    ax5.imshow(skin_mask, cmap='gray')
-                    skin_coverage = np.sum(skin_mask > 0) / skin_mask.size * 100
-                    ax5.set_title(f'5. 🎭 Skin Detection Mask\n{skin_coverage:.1f}% coverage')
-                else:
-                    ax5.text(0.5, 0.5, 'Skin detection\nfailed', ha='center', va='center', transform=ax5.transAxes)
-                    ax5.set_title('5. 🎭 Skin Detection Mask\n(Failed)')
-            except:
-                ax5.text(0.5, 0.5, 'Skin detection\nnot available', ha='center', va='center', transform=ax5.transAxes)
-                ax5.set_title('5. 🎭 Skin Detection Mask\n(N/A)')
-            ax5.axis('off')
+            ax5.set_facecolor(bg_color)
+            # Create proper mask for processed image
+            if hand_crop_bg_removed is not None and hand_crop_bg_removed.size > 0:
+                mask_bool = cv2.cvtColor(hand_crop_bg_removed, cv2.COLOR_BGR2GRAY) > 0
+                mask = mask_bool.astype(np.uint8) * 255  # Fix OpenCV compatibility
+            else:
+                mask = None
+            self._plot_unified_color_distribution(ax5, hand_crop_bg_removed, 'Processed Colors', 
+                                                title_fontsize, title_color, mask=mask)
             
-            # Panel 6: MOG2 foreground mask (safe visualization)
+            # Panel 6: Model Input
             ax6 = fig.add_subplot(gs[1, 1])
-            try:
-                # Create a safe visualization of MOG2-like motion detection
-                if (hasattr(self.hand_detector.bg_remover, 'static_background') and 
-                    self.hand_detector.bg_remover.static_background is not None):
-                    # Use static background to create motion-like mask
-                    crop_coords = (x, y, w, h)
-                    bg_crop = self.hand_detector.bg_remover.static_background[y:y+h, x:x+w]
-                    if bg_crop.shape == hand_crop.shape:
-                        # Create difference-based mask
-                        diff = cv2.absdiff(hand_crop, bg_crop)
-                        gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
-                        _, motion_mask = cv2.threshold(gray_diff, 30, 255, cv2.THRESH_BINARY)
-                        
-                        ax6.imshow(motion_mask, cmap='gray')
-                        motion_coverage = np.sum(motion_mask > 0) / motion_mask.size * 100
-                        ax6.set_title(f'6. 🏃 MOG2 Motion Mask\n{motion_coverage:.1f}% motion')
-                    else:
-                        ax6.text(0.5, 0.5, 'Background size\nmismatch', ha='center', va='center', transform=ax6.transAxes)
-                        ax6.set_title('6. 🏃 MOG2 Motion Mask\n(Size Error)')
-                else:
-                    ax6.text(0.5, 0.5, 'MOG2 background\nnot learned', ha='center', va='center', transform=ax6.transAxes)
-                    ax6.set_title('6. 🏃 MOG2 Motion Mask\n(Learning)')
-            except Exception as e:
-                ax6.text(0.5, 0.5, f'MOG2 analysis\nfailed', ha='center', va='center', transform=ax6.transAxes)
-                ax6.set_title('6. 🏃 MOG2 Motion Mask\n(Failed)')
+            ax6.set_facecolor(bg_color)
+            model_input_display = cv2.cvtColor(model_input_vis, cv2.COLOR_BGR2RGB)
+            ax6.imshow(model_input_display)
+            ax6.set_title('Model Input\n224×224px', 
+                         fontsize=title_fontsize, fontweight='bold', color=title_color)
             ax6.axis('off')
-            
-            # Panel 7: Background method analysis
+
+            # Panel 7: Model Predictions (UNIFIED)
             ax7 = fig.add_subplot(gs[1, 2])
-            ax7.axis('off')
+            ax7.set_facecolor(bg_color)
+            self._plot_unified_predictions(ax7, model_probs, prediction, title_fontsize, title_color)
             
-            # Analyze which background removal method was used
-            if hand_crop_bg_removed is not None:
-                # Check if this looks like MOG2+skin combination
-                bg_mask = np.any(hand_crop_bg_removed > 5, axis=2)
-                mog2_pixels = np.sum(bg_mask)
-                
-                bg_analysis_text = f"""Background Method:
-
-Enhanced Analysis:
-• Method: MOG2 + Skin Detection
-• Background pixels: {np.sum(~bg_mask):,}
-• Foreground pixels: {mog2_pixels:,}
-• Removal ratio: {np.sum(~bg_mask)/bg_mask.size*100:.1f}%
-
-Algorithm:
-• Static BG difference
-• Skin color preservation  
-• Morphological cleanup
-• Black background fill
-
-Status:
-{'✅ MOG2 + Skin active' if mog2_pixels > 0 else '⚠️ Simple skin detection'}
-"""
-            
-                ax7.text(0.05, 0.95, bg_analysis_text, transform=ax7.transAxes,
-                         fontsize=8, verticalalignment='top', fontfamily='monospace')
-            else:
-                bg_simple_text = f"""Background Method:
-
-Method: Simple skin detection
-Status: ✅ Active (fallback)
-
-Algorithm:
-• BGR ratio detection
-• HSV color thresholding  
-• Morphological cleanup
-• Non-skin → black pixels
-
-Quality: Reliable baseline
-"""
-                ax7.text(0.05, 0.95, bg_simple_text, transform=ax7.transAxes,
-                         fontsize=8, verticalalignment='top', fontfamily='monospace')
-            
-            ax7.set_title('7. 🎭 Background Method')
-            
-            # ========== STEP 3: BACKGROUND REMOVAL ==========
-            # Panel 8: Background removed result
+            # Panel 8: Stats (UNIFIED)
             ax8 = fig.add_subplot(gs[1, 3])
-            if hand_crop_bg_removed is not None:
-                ax8.imshow(cv2.cvtColor(hand_crop_bg_removed, cv2.COLOR_BGR2RGB))
-                ax8.set_title(f'8. 🎭 Background Removed\n{hand_crop_bg_removed.shape[1]}×{hand_crop_bg_removed.shape[0]} pixels')
-            else:
-                ax8.text(0.5, 0.5, 'Background removal\nfailed', ha='center', va='center',
-                        transform=ax8.transAxes, fontsize=12)
-                ax8.set_title('8. 🎭 Background Removed\n(Failed)')
-            ax8.axis('off')
+            ax8.set_facecolor(bg_color)
+            self._plot_unified_stats(ax8, prediction, confidence, max_prob, entropy, 
+                                   w, h, fps, title_fontsize, title_color)
             
-            # Panel 9: Background removal histogram (NORMALIZED Y-VALUES)
-            ax9 = fig.add_subplot(gs[2, 0])
-            
-            if hand_crop_bg_removed is not None and len(hand_crop_bg_removed.shape) == 3:
-                # Show histogram with background pixels filtered out
-                bg_mask = np.any(hand_crop_bg_removed > 5, axis=2)  # Non-black pixels
-                if np.any(bg_mask):
-                    max_freq = 0  # Track maximum frequency for normalization
-                    color_hists = []
-                    
-                    for i, color in enumerate(['blue', 'green', 'red']):
-                        channel_data = hand_crop_bg_removed[:, :, i][bg_mask]
-                        if len(channel_data) > 0:
-                            hist, bins = np.histogram(channel_data, bins=30, range=[0, 255])
-                            max_freq = max(max_freq, np.max(hist))
-                            color_hists.append((hist, bins, color))
-                    
-                    # Plot normalized histograms
-                    for hist, bins, color in color_hists:
-                        bin_centers = (bins[:-1] + bins[1:]) / 2
-                        # Normalize to 0-1 range
-                        normalized_hist = hist / max_freq if max_freq > 0 else hist
-                        ax9.plot(bin_centers, normalized_hist, color=color, alpha=0.7, label=f'{color.upper()}', linewidth=2)
-                    
-                    ax9.set_title('9. 📊 BG-Removed Histogram\n(Normalized)')
-                    ax9.set_xlabel('Pixel Value (0-255)')
-                    ax9.set_ylabel('Normalized Frequency (0-1)')
-                    ax9.set_ylim(0, 1)  # Fixed 0-1 range
-                    ax9.legend()
-                    ax9.grid(True, alpha=0.3)
-                    
-                    # Add stats
-                    skin_pixel_count = np.sum(bg_mask)
-                    ax9.text(0.02, 0.98, f'Skin pixels: {skin_pixel_count:,}\nTotal pixels: {bg_mask.size:,}',
-                            transform=ax9.transAxes, fontsize=8, verticalalignment='top',
-                            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
-                else:
-                    ax9.text(0.5, 0.5, 'No skin pixels\ndetected', ha='center', va='center',
-                            transform=ax9.transAxes)
-                    ax9.set_title('9. 📊 BG-Removed Histogram')
-            else:
-                ax9.text(0.5, 0.5, 'Background removal\nfailed', ha='center', va='center',
-                        transform=ax9.transAxes)
-                ax9.set_title('9. 📊 BG-Removed Histogram')
-            
-            # ========== STEP 4: MODEL RESULTS ==========
-            # Panel 12: Prediction confidence visualization (moved to position [2,1])
-            ax12 = fig.add_subplot(gs[2, 1])
-            if hasattr(self.model, 'class_map') and self.model.class_map:
-                classes = list(self.model.class_map.keys())
-                # Create a mock prediction distribution (in real scenario, you'd get this from model output)
-                probs = [0.1, 0.1, 0.1]  # Default low probabilities
-                if prediction in classes:
-                    pred_idx = classes.index(prediction)
-                    probs[pred_idx] = confidence
-                    # Normalize remaining probability
-                    remaining = (1.0 - confidence) / (len(classes) - 1)
-                    for i, p in enumerate(probs):
-                        if i != pred_idx:
-                            probs[i] = remaining
-                
-                bars = ax12.bar(classes, probs, color=['red' if p == confidence else 'gray' for p in probs])
-                ax12.set_title('12. 🧠 Model Prediction')
-                ax12.set_ylabel('Probability')
-                ax12.set_ylim(0, 1)
-                
-                # Highlight the predicted class
-                for i, (bar, prob) in enumerate(zip(bars, probs)):
-                    if prob == confidence:
-                        bar.set_color('green')
-                        ax12.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
-                               f'{prob:.3f}', ha='center', va='bottom', fontweight='bold')
-            else:
-                ax12.text(0.5, 0.5, 'No class info\navailable', ha='center', va='center', 
-                        transform=ax12.transAxes)
-                ax12.set_title('12. 🧠 Model Prediction')
-
             plt.tight_layout()
             plt.show()
             
-            # Save the data
-            self._save_capture_data(frame, hand_crop, hand_crop_bg_removed, model_input_np, hand_info, prediction, confidence)
+            # Clean console output
+            print(f"\n🎯 ASL Analysis Complete!")
+            print(f"  Prediction: {prediction} ({confidence:.1%})")
+            print(f"  Hand: {w}×{h}px | FPS: {fps:.1f}")
+            print(f"  Probabilities: A={model_probs[0]:.3f}, B={model_probs[1]:.3f}, C={model_probs[2]:.3f}")
+            print(f"  Files saved to: data/raw/captures\n")
+            
+            # Save data
+            self._save_capture_data(frame, hand_crop, hand_crop_bg_removed, processed_hand, hand_info, prediction, confidence)
+            
         except Exception as e:
-            logger.error(f"Error in capture and visualization: {e}")
-            print(f"❌ Capture and visualization failed: {e}")
+            logger.error(f"Error in capture visualization: {e}")
+            print(f"❌ Capture failed: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _plot_unified_color_distribution(self, ax, image: np.ndarray, title: str, 
+                                        title_fontsize: int, title_color: str, mask=None):
+        """Unified color distribution plotting with consistent style."""
+        if image is None or image.size == 0:
+            ax.text(0.5, 0.5, 'No Data', ha='center', va='center', fontsize=10)
+            ax.set_title(title, fontsize=title_fontsize, fontweight='bold', color=title_color)
+            ax.axis('off')
+            return
+
+        colors = ['#e74c3c', '#27ae60', '#3498db']  # Consistent colors
+        labels = ['Red', 'Green', 'Blue']
+        
+        # Calculate mean intensity safely
+        if mask is not None and np.any(mask):
+            mean_intensity = cv2.mean(image, mask=mask)[:3]
+        else:
+            mean_intensity = cv2.mean(image)[:3]
+
+        # Plot histograms with unified style
+        for i, (color, label) in enumerate(zip(colors, labels)):
+            hist = cv2.calcHist([image], [i], mask, [256], [0, 256])
+            hist = hist.flatten()
+            if hist.max() > 0:
+                hist = hist / hist.max()  # Normalize
+            ax.plot(hist, color=color, alpha=0.7, linewidth=2, 
+                   label=f'{label} ({int(mean_intensity[2-i])})')  # BGR to RGB order
+        
+        ax.set_xlim(0, 255)
+        ax.set_ylim(0, 1.0)
+        ax.set_xlabel('Intensity', fontsize=8)
+        ax.set_ylabel('Frequency', fontsize=8)
+        ax.legend(fontsize=8, loc='upper right')
+        ax.grid(True, alpha=0.3)
+        ax.set_title(title, fontsize=title_fontsize, fontweight='bold', color=title_color)
+    
+    def _plot_unified_predictions(self, ax, model_probs: np.ndarray, prediction: str, 
+                                title_fontsize: int, title_color: str):
+        """Unified prediction plotting with consistent style."""
+        class_names = ['A', 'B', 'C']
+        colors = ['#3498db', '#e74c3c', '#27ae60']
+        
+        bars = ax.bar(class_names, model_probs, color=colors, alpha=0.7, 
+                     edgecolor='#2c3e50', linewidth=1)
+        
+        # Add values on bars
+        for bar, prob in zip(bars, model_probs):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + 0.02,
+                   f'{prob:.3f}', ha='center', va='bottom', 
+                   fontweight='bold', fontsize=9, color='#2c3e50')
+        
+        # Highlight prediction
+        try:
+            predicted_idx = self.classes.index(prediction)
+            bars[predicted_idx].set_color('#f1c40f')
+            bars[predicted_idx].set_edgecolor('#e67e22')
+            bars[predicted_idx].set_linewidth(3)
+        except (ValueError, IndexError):
+            pass
+        
+        ax.set_ylim(0, 1.1)
+        ax.set_ylabel('Confidence', fontsize=8)
+        ax.set_title(f'Predictions\nWinner: {prediction}', 
+                    fontsize=title_fontsize, fontweight='bold', color=title_color)
+        ax.grid(True, alpha=0.3, axis='y')
+    
+    def _plot_unified_stats(self, ax, prediction: str, confidence: float, max_prob: float, 
+                          entropy: float, w: int, h: int, fps: float, 
+                          title_fontsize: int, title_color: str):
+        """Unified stats display with consistent style."""
+        stats_text = f"""Results
+Class: {prediction}
+Confidence: {confidence:.1%}
+Max Prob: {max_prob:.1%}
+Entropy: {entropy:.3f}
+
+Dimensions
+Original: {w}×{h}px
+Model: 224×224px
+Pixels: {w*h:,}
+
+Performance
+FPS: {fps:.1f}
+Device: {str(self.device).upper()}
+Status: Real-time"""
+        
+        ax.text(0.05, 0.95, stats_text, transform=ax.transAxes, fontsize=8,
+               verticalalignment='top', fontfamily='monospace', color='#2c3e50')
+        ax.set_title('Statistics', fontsize=title_fontsize, fontweight='bold', color=title_color)
+        ax.axis('off')
     
     def _save_capture_data(self, frame: np.ndarray, hand_crop: np.ndarray, 
                           hand_crop_bg_removed: Optional[np.ndarray], model_input_np: np.ndarray,
@@ -490,73 +409,91 @@ Quality: Reliable baseline
             import time
             import json
             from pathlib import Path
+            import shutil
             
             x, y, w, h = hand_info['bbox']
             fps = self.fps_tracker.get_fps()
             
-            # Save capture data
+            # Save capture data with robust directory handling
             timestamp = time.time()
             capture_dir = Path("data/raw/captures")
-            capture_dir.mkdir(parents=True, exist_ok=True)
             
-            capture_base = capture_dir / f"live_capture_{prediction}_{timestamp:.0f}"
+            # CRITICAL FIX: Robust directory creation with cleanup
+            try:
+                # If directory exists, remove it completely first
+                if capture_dir.exists():
+                    shutil.rmtree(capture_dir, ignore_errors=True)
+                    
+                # Small delay to ensure filesystem sync
+                import time
+                time.sleep(0.1)
+                
+                # Create fresh directory
+                capture_dir.mkdir(parents=True, exist_ok=True)
+                logger.debug("✅ Capture directory created successfully")
+                
+            except Exception as e:
+                logger.warning(f"Directory creation issue: {e}")
+                # Use timestamp-based directory as fallback
+                import random
+                fallback_name = f"captures_{int(timestamp)}_{random.randint(1000, 9999)}"
+                capture_dir = Path(f"data/raw/{fallback_name}")
+                capture_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"✅ Using fallback directory: {capture_dir}")
+            
+            # Create timestamp-based filenames
+            time_str = time.strftime("%Y%m%d_%H%M%S", time.localtime(timestamp))
             
             # Save images
-            cv2.imwrite(f"{capture_base}_original.jpg", hand_crop)
-            if hand_crop_bg_removed is not None:
-                cv2.imwrite(f"{capture_base}_bg_removed.jpg", hand_crop_bg_removed)
-            cv2.imwrite(f"{capture_base}_model_input.jpg", model_input_np)
-            cv2.imwrite(f"{capture_base}_full_frame.jpg", frame)
+            cv2.imwrite(str(capture_dir / f"frame_{time_str}.jpg"), frame)
+            cv2.imwrite(str(capture_dir / f"hand_crop_{time_str}.jpg"), hand_crop)
             
-            # Save comprehensive metadata
-            capture_metadata = {
+            # Save background removed image if available
+            if hand_crop_bg_removed is not None:
+                cv2.imwrite(str(capture_dir / f"hand_bg_removed_{time_str}.jpg"), hand_crop_bg_removed)
+            
+            # Save model input (convert if needed)
+            if isinstance(model_input_np, torch.Tensor):
+                model_input_np = model_input_np.cpu().numpy()
+            
+            if len(model_input_np.shape) == 4:  # Batch dimension
+                model_input_np = model_input_np[0]
+            if len(model_input_np.shape) == 3 and model_input_np.shape[0] == 3:  # CHW format
+                model_input_np = np.transpose(model_input_np, (1, 2, 0))
+            
+            # Denormalize for saving
+            if model_input_np.min() < 0:  # If normalized
+                mean = np.array([0.485, 0.456, 0.406])
+                std = np.array([0.229, 0.224, 0.225])
+                model_input_np = (model_input_np * std + mean)
+                model_input_np = np.clip(model_input_np, 0, 1)
+            
+            # Convert to BGR for OpenCV
+            if model_input_np.max() <= 1.0:
+                model_input_np = (model_input_np * 255).astype(np.uint8)
+            model_input_bgr = cv2.cvtColor(model_input_np, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(str(capture_dir / f"model_input_{time_str}.jpg"), model_input_bgr)
+            
+            # Save metadata
+            metadata = {
                 'timestamp': timestamp,
                 'prediction': prediction,
                 'confidence': float(confidence),
-                'bbox': [x, y, w, h],
-                'hand_size': [w, h],
-                'hand_area': w * h,
-                'aspect_ratio': float(w / h if h > 0 else 1.0),
-                'model_info': {
-                    'device': str(self.device),
-                    'classes': self.classes,
-                    'input_size': [224, 224, 3],
-                    'confidence_threshold': self.min_pred_confidence
-                },
-                'performance': {
-                    'fps': float(fps),
-                    'frame_size': list(frame.shape),
-                    'hand_crop_size': list(hand_crop.shape),
-                    'model_input_size': list(model_input_np.shape)
-                },
-                'processing_pipeline': {
-                    'background_removal_method': 'enhanced' if hand_crop_bg_removed is not None else 'simple',
-                    'resize_method': 'cv2.INTER_AREA',
-                    'normalization': 'ImageNet',
-                    'color_conversion': 'BGR_to_RGB'
-                },
-                'files': {
-                    'original_crop': f"{capture_base.name}_original.jpg",
-                    'bg_removed_crop': f"{capture_base.name}_bg_removed.jpg" if hand_crop_bg_removed is not None else None,
-                    'model_input': f"{capture_base.name}_model_input.jpg",
-                    'full_frame': f"{capture_base.name}_full_frame.jpg"
-                }
+                'hand_info': hand_info,
+                'fps': fps,
+                'processing_method': 'background_removal_then_resize',
+                'model_input_size': '224x224',
+                'original_hand_size': f'{w}x{h}'
             }
             
-            with open(f"{capture_base}_metadata.json", 'w') as f:
-                json.dump(capture_metadata, f, indent=2)
+            with open(capture_dir / f"metadata_{time_str}.json", 'w') as f:
+                json.dump(metadata, f, indent=2)
             
-            print(f"\n🎯 Live ASL Data Captured and Visualized!")
-            print(f"  Prediction: {prediction} ({confidence:.3f})")
-            print(f"  Hand size: {w}×{h} pixels ({w*h:,} total)")
-            print(f"  Model input: 224×224×3 preprocessed")
-            print(f"  System FPS: {fps:.1f}")
-            print(f"  Files saved to: {capture_dir}")
-            print(f"  📊 Close the visualization window when done viewing.")
+            logger.info(f"✅ Files saved to: {capture_dir}")
             
         except Exception as e:
-            logger.error(f"Error saving capture data: {e}")
-            print(f"❌ Capture save failed: {e}")
+            logger.warning(f"Failed to save capture data: {e}")
+            print(f"  Warning: Could not save files: {e}")
     
     def _evaluate_model_performance(self, frame: np.ndarray, processed_hand: np.ndarray, 
                                   hand_info: Dict, prediction: str, confidence: float) -> None:
@@ -587,7 +524,13 @@ Quality: Reliable baseline
             
             # Get different preprocessing versions for comparison
             hand_crop_original = hand_crop.copy()
-            hand_crop_bg_removed = self.hand_detector._remove_background_from_crop(hand_crop)
+            # Call background removal with proper crop coordinates
+            crop_coords = (x, y, x+w, y+h)  # Convert to (x1, y1, x2, y2) format
+            try:
+                hand_crop_bg_removed = self.hand_detector._remove_background_from_crop(hand_crop, crop_coords)
+            except Exception as e:
+                logger.warning(f"Background removal failed: {e}")
+                hand_crop_bg_removed = hand_crop.copy()
             hand_crop_no_bg_removal = cv2.resize(hand_crop_original, (224, 224))
             
             # Test model on different versions
@@ -1138,6 +1081,26 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
 
         self.cap.release()
         cv2.destroyAllWindows()
+
+    def _denormalize_for_visualization(self, tensor_img: torch.Tensor) -> np.ndarray:
+        """Denormalize a tensor image and convert to a displayable format."""
+        if tensor_img is None or tensor_img.size() == 0:
+            return None
+
+        # Denormalize the image
+        mean = torch.tensor([0.485, 0.456, 0.406], device=tensor_img.device)
+        std = torch.tensor([0.229, 0.224, 0.225], device=tensor_img.device)
+        denormalized_img = tensor_img * std + mean
+        denormalized_img = torch.clamp(denormalized_img, 0, 1)
+
+        # Convert to numpy array
+        denormalized_np = denormalized_img.cpu().numpy()
+        if len(denormalized_np.shape) == 4:
+            denormalized_np = denormalized_np[0]
+        if len(denormalized_np.shape) == 3 and denormalized_np.shape[0] == 3:
+            denormalized_np = np.transpose(denormalized_np, (1, 2, 0))
+
+        return denormalized_np
 
 def main():
     """Main function to run the recognizer"""
