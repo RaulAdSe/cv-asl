@@ -8,7 +8,7 @@ reliable hand bounding box for ASL gesture recognition.
 
 import cv2
 import numpy as np
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Any
 import logging
 
 from .background_removal import BackgroundRemover
@@ -31,7 +31,7 @@ class ASLHandDetector:
     
     def __init__(self, min_contour_area=3000, search_roi_scale=1.5):
         self.bg_remover = BackgroundRemover()
-        self.tracker = HandTracker(patience=5) # 5 frames of patience
+        self.tracker = HandTracker(patience=15) # Increased patience: allow 15 frames without measurement
         self.min_contour_area = min_contour_area
         self.search_roi_scale = search_roi_scale
         
@@ -67,11 +67,11 @@ class ASLHandDetector:
         
         return new_x, new_y, new_x2 - new_x, new_y2 - new_y
 
-    def _preprocess_hand(self, frame: np.ndarray, bbox: Tuple[int, int, int, int], target_size: int) -> Optional[np.ndarray]:
-        """Crops, squares, removes background, and enhances the hand image for the model."""
+    def _get_squared_crop(self, frame: np.ndarray, bbox: Tuple[int, int, int, int]) -> Optional[Tuple[np.ndarray, Tuple[int, int, int, int]]]:
+        """Extracts a squared crop and its coordinates around the bounding box."""
         x, y, w, h = bbox
         if w <= 0 or h <= 0: return None
-        
+
         center_x, center_y, max_dim = x + w // 2, y + h // 2, max(w, h)
         
         crop_x1 = max(0, center_x - max_dim // 2)
@@ -81,16 +81,29 @@ class ASLHandDetector:
         
         hand_crop = frame[crop_y1:crop_y2, crop_x1:crop_x2]
         if hand_crop.size == 0: return None
-        
-        # Pass the crop coordinates along with the hand crop
+
         crop_coords = (crop_x1, crop_y1, crop_x2, crop_y2)
+        return hand_crop, crop_coords
+
+    def _preprocess_hand(self, frame: np.ndarray, bbox: Tuple[int, int, int, int], target_size: int) -> Optional[np.ndarray]:
+        """Crops, squares, removes background, and enhances the hand image for the model."""
+        crop_result = self._get_squared_crop(frame, bbox)
+        if not crop_result:
+            return None
+        hand_crop, crop_coords = crop_result
+
         hand_crop_bg_removed = self._remove_background_from_crop(hand_crop, crop_coords)
         
-        # Resize to square
-        resized = cv2.resize(hand_crop_bg_removed, (target_size, target_size), interpolation=cv2.INTER_AREA)
+        # Resize to the target size for the model
+        model_input = cv2.resize(hand_crop_bg_removed, (target_size, target_size), interpolation=cv2.INTER_AREA)
         
-        return resized
-    
+        return model_input
+
+    def _get_hand_crop(self, frame: np.ndarray, bbox: Tuple[int, int, int, int]) -> Optional[np.ndarray]:
+        """Gets the raw hand crop without background removal."""
+        crop_result = self._get_squared_crop(frame, bbox)
+        return crop_result[0] if crop_result else None
+
     def get_skin_mask_for_crop(self, hand_crop: np.ndarray) -> np.ndarray:
         """
         Get the skin detection mask for visualization purposes.
@@ -294,77 +307,185 @@ class ASLHandDetector:
             result[final_mask == 0] = [0, 0, 0]
             
         except Exception as e:
-            logger.warning(f"Enhanced skin removal failed, using basic fallback: {e}")
-            # Ultimate fallback: simple BGR detection
-            b, g, r = cv2.split(hand_crop)
-            simple_mask = ((r > 60) & (r > g) & (g > b)).astype(np.uint8) * 255
-            result[simple_mask == 0] = [0, 0, 0]
+            logger.warning(f"Error in fast skin removal: {e}")
+            return np.zeros_like(hand_crop)
             
         return result
 
-    def detect_and_process_hand(self, frame: np.ndarray, target_size: int) -> Tuple[Optional[np.ndarray], Optional[Dict]]:
+    def _get_measurement_bbox(self, frame: np.ndarray, predicted_bbox: Tuple[int, int, int, int]) -> Optional[Tuple[int, int, int, int]]:
         """
-        The main pipeline for detecting, tracking, and processing the hand.
-        This version ensures that a "ghost" bounding box is not shown when the
-        hand is temporarily lost, and that full-frame detection resumes reliably.
+        Get measurement bbox around the predicted location for tracker update.
+        This validates that there's still a hand-like object at the predicted location.
         """
-        _, fg_mask = self.bg_remover.remove_background(frame)
-        hand_bbox = None
-        status = "LOST" # Default status if nothing is found
+        try:
+            # Extract region around prediction for validation
+            x, y, w, h = predicted_bbox
+            
+            # Expand search area more generously to account for fast movement
+            search_margin = max(30, min(w, h) // 3)
+            search_x1 = max(0, x - search_margin)
+            search_y1 = max(0, y - search_margin)
+            search_x2 = min(frame.shape[1], x + w + search_margin)
+            search_y2 = min(frame.shape[0], y + h + search_margin)
+            
+            search_region = frame[search_y1:search_y2, search_x1:search_x2]
+            if search_region.size == 0:
+                return None
+            
+            # Use background subtraction to find foreground in search region
+            try:
+                _, fg_mask = self.bg_remover.remove_background(search_region)
+                if fg_mask is None:
+                    return None
+            except Exception as e:
+                logger.debug(f"Background removal failed in measurement: {e}")
+                return None
+            
+            # Check if there's any foreground at all
+            if not np.any(fg_mask):
+                return None
+            
+            # Find contours in the search region
+            contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not contours:
+                return None
+            
+            # Find the largest contour (should be the hand)
+            largest_contour = max(contours, key=cv2.contourArea)
+            contour_area = cv2.contourArea(largest_contour)
+            
+            # Use a more lenient area threshold - adapt based on predicted bbox size
+            min_area = max(300, (w * h) * 0.1)  # At least 10% of predicted bbox area
+            if contour_area < min_area:
+                return None
+            
+            # Get bounding box of the largest contour
+            rel_x, rel_y, rel_w, rel_h = cv2.boundingRect(largest_contour)
+            
+            # Convert back to absolute coordinates
+            abs_x = search_x1 + rel_x
+            abs_y = search_y1 + rel_y
+            
+            # Validate the measurement makes sense (not too far from prediction)
+            pred_center_x = x + w // 2
+            pred_center_y = y + h // 2
+            meas_center_x = abs_x + rel_w // 2
+            meas_center_y = abs_y + rel_h // 2
+            
+            # Allow reasonable distance from prediction
+            max_distance = max(w, h)  # Can move up to width or height of bbox
+            distance = np.sqrt((pred_center_x - meas_center_x)**2 + (pred_center_y - meas_center_y)**2)
+            
+            if distance > max_distance:
+                # Measurement is too far from prediction, likely noise
+                return None
+            
+            return (abs_x, abs_y, rel_w, rel_h)
+            
+        except Exception as e:
+            logger.debug(f"Failed to get measurement bbox: {e}")
+            return None
 
-        if self.tracker.is_tracking:
-            # --- TRACKING STATE ---
-            # We believe a hand is present. Let's try to track it.
-            predicted_bbox, pred_status = self.tracker.predict()
+    def detect_and_process_hand(
+        self, frame: np.ndarray, frame_for_bg: np.ndarray, target_size: int
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Main function to detect, track, and process the hand.
+        
+        Args:
+            frame: The current video frame for tracking and processing.
+            frame_for_bg: The frame to be used for background subtraction (might be skipped).
+            target_size: The size of the output image for the model.
 
-            if pred_status == "LOST":
-                # The tracker gave up. It is now reset.
-                # We'll let the logic fall through to the SEARCHING state below.
-                pass
+        Returns:
+            A dictionary with processed data, or None if no hand is detected.
+        """
+        status = "UNKNOWN"
+        bbox = None
+        
+        # If the tracker is not tracking, try to re-initialize it
+        if not self.tracker.is_tracking:
+            # Get foreground mask for hand detection
+            try:
+                # Use the background remover's remove_background method to get foreground
+                _, foreground_mask = self.bg_remover.remove_background(frame_for_bg)
+                if foreground_mask is None or not np.any(foreground_mask):
+                    return None
+            except Exception as e:
+                logger.warning(f"Failed to get foreground mask: {e}")
+                return None
+
+            # Find the largest contour, which we assume is the hand
+            bbox = self._find_best_hand_contour(foreground_mask)
+            if bbox:
+                self.tracker.initialize(bbox)
+                status = "INITIALIZED"
+                logger.info(f"HandTracker initialized at position: ({bbox[0] + bbox[2] // 2:.2f}, {bbox[1] + bbox[3] // 2:.2f})")
             else:
-                # Tracker is still active. Search for the hand in the predicted ROI.
-                roi_bbox = self._get_search_roi(predicted_bbox, frame.shape)
-                x, y, w, h = roi_bbox
+                return None
+        else:
+            # Update the tracker with prediction and measurement
+            try:
+                # Get prediction from tracker
+                predict_result = self.tracker.predict()
+                if predict_result is None or predict_result[0] is None:
+                    # Tracker has lost tracking due to patience timeout
+                    return None
                 
-                # We need to handle the case where the ROI is empty
-                if w > 0 and h > 0:
-                    best_in_roi = self._find_best_hand_contour(fg_mask[y:y+h, x:x+w])
-                else:
-                    best_in_roi = None
-
-                if best_in_roi:
-                    # SUCCESS: We found the hand. Update the tracker with the new location.
-                    gx, gy, gw, gh = best_in_roi
-                    hand_bbox = (gx + x, gy + y, gw, gh)
-                    self.tracker.update(hand_bbox)
+                predicted_bbox, predict_status = predict_result
+                bbox = predicted_bbox  # Use prediction as default
+                status = predict_status
+                
+                # Try to get a measurement to improve tracking
+                measurement_bbox = self._get_measurement_bbox(frame, predicted_bbox)
+                if measurement_bbox:
+                    # Update with measurement if available
+                    self.tracker.update(measurement_bbox)
+                    bbox = measurement_bbox  # Use measurement instead
                     status = "TRACKED"
                 else:
-                    # MISS: No hand in the ROI. Tell the tracker.
-                    # It will start its patience countdown. No box will be shown.
-                    self.tracker.update(None)
-                    status = "LOST"
-        
-        if not self.tracker.is_tracking:
-            # --- SEARCHING STATE ---
-            # The tracker is not active, so we search the whole frame.
-            status = "LOST"
-            hand_bbox = self._find_best_hand_contour(fg_mask)
-            if hand_bbox:
-                # SUCCESS: We found a new hand. Initialize the tracker.
-                self.tracker.initialize(hand_bbox)
-                status = "NEW_DETECTION"
+                    # No measurement available, but don't reset immediately
+                    # Let the tracker handle this with its built-in patience system
+                    self.tracker.update(None)  # This will increment the lost counter
+                    # Continue using the predicted bbox
+                    
+            except Exception as e:
+                logger.warning(f"Tracker update failed: {e}")
+                self.tracker.reset()
+                return None
 
-        # --- Prepare Output ---
-        processed_hand, hand_info = None, None
-        if hand_bbox is not None:
-            # Only create info dict if we have a box to draw.
-            hand_info = {"bbox": hand_bbox, "status": status}
-            processed_hand = self._preprocess_hand(frame, hand_bbox, target_size)
+        # Validate bbox before processing
+        if bbox is None:
+            return None
             
-        return processed_hand, hand_info
+        # --- Data Preparation for Model and Visualization ---
+        
+        # Main hand processing pipeline for the model
+        processed_hand = self._preprocess_hand(frame, bbox, target_size)
+        
+        # For visualization, we need the raw crop and its coordinates
+        crop_result = self._get_squared_crop(frame, bbox)
+        if not crop_result:
+            hand_crop, crop_coords = None, None
+        else:
+            hand_crop, crop_coords = crop_result
+
+        # Get skin mask for visualization
+        skin_mask_crop = self.get_skin_mask_for_crop(hand_crop) if hand_crop is not None else None
+        
+        return {
+            "processed_hand": processed_hand,
+            "hand_crop": hand_crop,
+            "crop_coords": crop_coords,
+            "skin_mask_crop": skin_mask_crop,
+            "bbox": bbox,
+            "status": status,
+            "confidence": 0.9, # Placeholder confidence
+            "landmarks": [], # Placeholder
+            "tracking": self.tracker.is_tracking,
+        }
 
     def reset(self):
-        """Resets the state of the detector and its components."""
-        self.bg_remover.reset()
+        """Resets the tracker and detection state."""
         self.tracker.reset()
         logger.info("ASL Hand Detector state has been reset.") 

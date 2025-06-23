@@ -184,38 +184,45 @@ class LiveASLRecognizer:
             import json
             
             # Extract hand information
-            bbox = hand_info.get('bbox', (0, 0, 100, 100))
+            bbox = hand_info.get('bbox')
+            hand_crop = hand_info.get('hand_crop')
+            crop_coords = hand_info.get('crop_coords') # Get the crop coordinates
+            skin_mask_crop = hand_info.get('skin_mask_crop')
+            
+            if hand_crop is None or bbox is None or crop_coords is None:
+                logger.warning("Capture failed: Missing essential hand data (crop, bbox, or coords).")
+                return
+
             x, y, w, h = bbox
             
-            # Extract hand crop from original frame
-            hand_crop = frame[y:y+h, x:x+w].copy()
-            
-            # Get the background-removed version and skin mask for visualization
+            # Get the background-removed version for visualization
             hand_crop_bg_removed = None
-            skin_mask_crop = None
             if hasattr(self.hand_detector, '_remove_background_from_crop'):
                 try:
-                    hand_crop_bg_removed = self.hand_detector._remove_background_from_crop(hand_crop)
-                    skin_mask_crop = self.hand_detector.get_skin_mask_for_crop(hand_crop)
+                    # Pass the essential crop_coords to the function
+                    hand_crop_bg_removed = self.hand_detector._remove_background_from_crop(hand_crop, crop_coords)
                 except Exception as e:
                     logger.warning(f"Failed to get background-removed crop for visualization: {e}")
             
-            # Get model input tensor (224x224 normalized)
-            model_input = processed_hand
-            if isinstance(model_input, torch.Tensor):
-                # Convert tensor back to displayable image
-                model_input_np = model_input.cpu().numpy()
-                if len(model_input_np.shape) == 4:  # Batch dimension
-                    model_input_np = model_input_np[0]
-                # Denormalize from ImageNet normalization
+            # Get model input tensor (224x224 normalized) and convert for display
+            model_input_np = None
+            if processed_hand is not None:
+                # Convert tensor back to a displayable numpy image
+                temp_input = processed_hand
+                if isinstance(temp_input, torch.Tensor):
+                    temp_input = temp_input.cpu().numpy()
+                
+                if len(temp_input.shape) == 4:  # Batch dimension
+                    temp_input = temp_input[0]
+                
+                # Denormalize from ImageNet standard
+                # The tensor is CHW, so we transpose for numpy operations
+                temp_input = temp_input.transpose(1, 2, 0)
                 mean = np.array([0.485, 0.456, 0.406])
                 std = np.array([0.229, 0.224, 0.225])
-                model_input_np = model_input_np.transpose(1, 2, 0)  # CHW to HWC
-                model_input_np = (model_input_np * std + mean)
+                model_input_np = (temp_input * std + mean)
                 model_input_np = np.clip(model_input_np * 255, 0, 255).astype(np.uint8)
-            else:
-                model_input_np = model_input
-            
+
             # Create a 5x4 grid layout for comprehensive analysis
             fig = plt.figure(figsize=(16, 20))
             gs = GridSpec(5, 4, figure=fig, hspace=0.3, wspace=0.3)
@@ -233,17 +240,21 @@ class LiveASLRecognizer:
             ax2 = fig.add_subplot(gs[0, 1])
             if hand_crop_bg_removed is not None:
                 ax2.imshow(cv2.cvtColor(hand_crop_bg_removed, cv2.COLOR_BGR2RGB))
-                ax2.set_title(f'2. Background Removed\n{hand_crop_bg_removed.shape[1]}×{hand_crop_bg_removed.shape[0]} pixels')
+                ax2.set_title(f'2. Background Removed\n{hand_crop_bg_removed.shape[1]}×{hand_crop_bg_removed.shape[0]}')
             else:
-                ax2.text(0.5, 0.5, 'Background removal\nfailed', ha='center', va='center',
-                        transform=ax2.transAxes, fontsize=12)
-                ax2.set_title('2. Background Removed\n(Failed)')
+                ax2.text(0.5, 0.5, 'BG Removal Failed', ha='center', va='center',
+                        transform=ax2.transAxes, fontsize=10, color='red')
+                ax2.set_title('2. Background Removed')
             ax2.axis('off')
             
             # Panel 3: Model input (224x224 preprocessed)
             ax3 = fig.add_subplot(gs[0, 2])
-            ax3.imshow(model_input_np)
-            ax3.set_title(f'3. Model Input\n224×224 final')
+            if model_input_np is not None:
+                ax3.imshow(model_input_np)
+                ax3.set_title(f'3. Model Input\n224×224 final')
+            else:
+                ax3.text(0.5, 0.5, 'No Model Input', ha='center', va='center')
+                ax3.set_title('3. Model Input')
             ax3.axis('off')
             
             # Panel 4: Prediction confidence visualization
@@ -847,7 +858,9 @@ Confidence: {'✅' if confidence > 0.5 else '⚠️'}
             
             # Get different preprocessing versions for comparison
             hand_crop_original = hand_crop.copy()
-            hand_crop_bg_removed = self.hand_detector._remove_background_from_crop(hand_crop)
+            # Need to provide crop_coords for background removal
+            crop_coords = (x, y, x + w, y + h)
+            hand_crop_bg_removed = self.hand_detector._remove_background_from_crop(hand_crop, crop_coords)
             hand_crop_no_bg_removal = cv2.resize(hand_crop_original, (224, 224))
             
             # Test model on different versions
@@ -883,7 +896,7 @@ Confidence: {'✅' if confidence > 0.5 else '⚠️'}
                 std = np.array([0.229, 0.224, 0.225])
                 tensor_data = tensor_data.transpose(1, 2, 0)
                 tensor_data = (tensor_data * std + mean)
-                tensor_data = np.clip(tensor_data, 0, 1)
+                tensor_data = np.clip(tensor_data * 255, 0, 255).astype(np.uint8)
                 ax3.imshow(tensor_data)
             ax3.set_title(f'Model Input (224x224)\nNormalized & Processed')
             ax3.axis('off')
@@ -1189,19 +1202,20 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
         # --- Normal Processing ---
         self.fps_tracker.update()
         
-        processed_hand, hand_info = self.hand_detector.detect_and_process_hand(
-            frame, 224  # Use fixed size since model.INPUT_SIZE might not exist
+        hand_info = self.hand_detector.detect_and_process_hand(
+            frame, frame, 224  # frame, frame_for_bg, target_size
         )
         
         prediction, confidence = None, 0.0
-        if processed_hand is not None:
+        if hand_info and hand_info.get('processed_hand') is not None:
+            processed_hand = hand_info['processed_hand']
             prediction, confidence = self.predict_hand_sign(processed_hand)
             if confidence < self.min_pred_confidence:
                 prediction, confidence = None, 0.0
 
         # Store last results for UI drawing and capture
         self.last_hand_info = hand_info
-        self.last_processed_hand = processed_hand
+        self.last_processed_hand = hand_info.get('processed_hand') if hand_info else None
         self.last_capture_frame = frame.copy()
         
         if prediction is not None:
