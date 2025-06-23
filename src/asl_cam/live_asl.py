@@ -115,14 +115,17 @@ class LiveASLRecognizer:
         logger.info("🚀 Live ASL Recognizer initialized")
         logger.info(f"📱 Device: {self.device}")
         
-        # Extract classes from model, with fallback
+        # Extract classes from model, with proper validation
         if self.model.class_map is not None:
             self.classes = sorted(list(self.model.class_map.keys()))
+            logger.info(f"✅ Using model's class map: {self.model.class_map}")
         else:
-            # Fallback for models without class_map
+            # This should not happen with the fixed model loading
+            logger.error(f"❌ Model class_map is None - this indicates a loading issue!")
+            # Fallback for emergency cases
             self.classes = ['A', 'B', 'C']  # Default ASL classes
             self.model.class_map = {cls: idx for idx, cls in enumerate(self.classes)}
-            logger.warning(f"Model missing class_map, using default: {self.model.class_map}")
+            logger.warning(f"🚨 Using emergency fallback class_map: {self.model.class_map}")
             
         logger.info(f"🎯 Classes: {self.classes}")
     
