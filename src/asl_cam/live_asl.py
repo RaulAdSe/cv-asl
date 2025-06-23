@@ -168,7 +168,7 @@ class LiveASLRecognizer:
     
     def _capture_and_visualize_hand_data(self, frame: np.ndarray, processed_hand: np.ndarray, 
                                        hand_info: Dict, prediction: str, confidence: float) -> None:
-        """Non-blocking ASL analysis with unified styling and minimal titles."""
+        """Non-blocking ASL analysis with unified styling and proper workflow visualization."""
         try:
             import matplotlib.pyplot as plt
             from matplotlib.gridspec import GridSpec
@@ -179,17 +179,25 @@ class LiveASLRecognizer:
             x, y, w, h = bbox
             hand_crop = frame[y:y+h, x:x+w].copy()
             
-            # Try to get background-removed crop for visualization
-            try:
-                crop_coords = (x, y, w, h)
-                hand_crop_bg_removed = self.hand_detector._remove_background_from_crop(hand_crop, crop_coords)
-                if hand_crop_bg_removed is None:
-                    hand_crop_bg_removed = hand_crop.copy()
-            except Exception as e:
-                logger.warning(f"Failed to get background-removed crop for visualization: {e}")
-                hand_crop_bg_removed = hand_crop.copy()
+            # WORKFLOW CONSISTENCY: Use the same processed image for both panels
+            # processed_hand is what actually goes to the model, so use it for both
+            model_input_vis = processed_hand.copy()
             
-            # CRITICAL FIX: Proper tensor shape handling for model input
+            # Convert model input for display (handles both tensor and numpy)
+            if isinstance(model_input_vis, torch.Tensor):
+                model_input_vis = self._denormalize_for_visualization(model_input_vis)
+                if len(model_input_vis.shape) == 3 and model_input_vis.shape[0] == 3:
+                    # CHW -> HWC for display
+                    model_input_vis = np.transpose(model_input_vis, (1, 2, 0))
+                model_input_vis = (model_input_vis * 255).astype(np.uint8)
+                # Ensure it's in BGR format for consistency
+                if model_input_vis.shape[-1] == 3:
+                    model_input_vis = cv2.cvtColor(model_input_vis, cv2.COLOR_RGB2BGR)
+            
+            # Make background removed the same as model input for workflow consistency
+            hand_crop_bg_removed = model_input_vis.copy()
+            
+            # CRITICAL FIX: Proper tensor shape handling for model inference
             model_input_tensor = None
             model_probs = None
             try:
@@ -211,7 +219,7 @@ class LiveASLRecognizer:
                         raise ValueError(f"Unexpected tensor shape: {processed_hand.shape}")
                 
                 elif isinstance(processed_hand, torch.Tensor):
-                    model_input_tensor = processed_hand.clone()
+                    model_input_tensor = processed_hand.clone().detach()  # CRITICAL: detach() to avoid gradient errors
                     # Ensure it's in CHW format without batch dimension
                     if len(model_input_tensor.shape) == 4:  # BCHW -> CHW
                         model_input_tensor = model_input_tensor[0]
@@ -226,7 +234,11 @@ class LiveASLRecognizer:
                     # Get model predictions safely
                     model_input_batch = model_input_tensor.unsqueeze(0).to(self.device)  # Add batch dimension
                     logger.debug(f"✅ Model input shape: {model_input_batch.shape}")
-                    model_probs = self.model(model_input_batch).softmax(dim=1)[0].cpu().numpy()
+                    
+                    # CRITICAL FIX: Use detach() to avoid gradient computation errors
+                    with torch.no_grad():
+                        model_output = self.model(model_input_batch)
+                        model_probs = model_output.softmax(dim=1)[0].cpu().detach().numpy()
                 else:
                     raise ValueError("Could not create valid model input tensor")
                     
@@ -235,16 +247,6 @@ class LiveASLRecognizer:
                 # Create dummy probabilities as fallback
                 model_probs = np.array([0.33, 0.33, 0.34])
                 logger.warning("Using dummy probabilities due to model inference failure")
-            
-            # Create model input visualization
-            model_input_vis = processed_hand.copy()
-            
-            # Convert model input for display
-            if isinstance(model_input_vis, torch.Tensor):
-                model_input_vis = self._denormalize_for_visualization(model_input_vis)
-                if len(model_input_vis.shape) == 3 and model_input_vis.shape[0] == 3:
-                    model_input_vis = np.transpose(model_input_vis, (1, 2, 0))
-                model_input_vis = (model_input_vis * 255).astype(np.uint8)
             
             # Calculate stats
             max_prob = np.max(model_probs) if model_probs is not None else 0.0
@@ -283,46 +285,33 @@ class LiveASLRecognizer:
                          fontsize=title_fontsize, fontweight='bold', color=title_color)
             ax2.axis('off')
 
-            # Panel 3: Original Colors  
+            # Panel 3: Original Colors (Hand ROI)
             ax3 = fig.add_subplot(gs[0, 2])
             ax3.set_facecolor(bg_color)
             self._plot_unified_color_distribution(ax3, hand_crop, 'Original Colors', 
                                                 title_fontsize, title_color)
             
-            # Panel 4: Background Removed
+            # Panel 4: Background Removed (Same as Model Input for workflow consistency)
             ax4 = fig.add_subplot(gs[0, 3])
             ax4.set_facecolor(bg_color)
             if hand_crop_bg_removed is not None and hand_crop_bg_removed.size > 0:
                 hand_crop_bg_rgb = cv2.cvtColor(hand_crop_bg_removed, cv2.COLOR_BGR2RGB)
                 ax4.imshow(hand_crop_bg_rgb)
-                ax4.set_title('Background Removed', 
+                ax4.set_title('Background Removed\n224×224px', 
                              fontsize=title_fontsize, fontweight='bold', color=title_color)
             else:
                 ax4.text(0.5, 0.5, 'No BG Removal', ha='center', va='center')
-                ax4.set_title('Background Removed', 
+                ax4.set_title('Background Removed\n224×224px', 
                              fontsize=title_fontsize, fontweight='bold', color=title_color)
             ax4.axis('off')
 
-            # Panel 5: Processed Colors
+            # Panel 5: Processed Colors (Same as Background Removed for consistency)
             ax5 = fig.add_subplot(gs[1, 0])
             ax5.set_facecolor(bg_color)
-            # Create skin mask for color distribution if needed
-            if hand_crop_bg_removed is not None and hand_crop_bg_removed.size > 0:
-                skin_detector = self.hand_detector.bg_remover
-                try:
-                    mask_bool = skin_detector._get_skin_mask_simple(hand_crop_bg_removed)
-                    if mask_bool is not None:
-                        mask = mask_bool.astype(np.uint8) * 255  # Convert bool to uint8
-                    else:
-                        mask = None
-                except:
-                    mask = None
-            else:
-                mask = None
             self._plot_unified_color_distribution(ax5, hand_crop_bg_removed, 'Processed Colors', 
-                                                title_fontsize, title_color, mask=mask)
+                                                title_fontsize, title_color)
             
-            # Panel 6: Model Input
+            # Panel 6: Model Input (Same as Background Removed)
             ax6 = fig.add_subplot(gs[1, 1])
             ax6.set_facecolor(bg_color)
             model_input_display = cv2.cvtColor(model_input_vis, cv2.COLOR_BGR2RGB)
@@ -363,7 +352,7 @@ class LiveASLRecognizer:
             print(f"  📂 Files saved to: data/raw/captures\n")
             
             # Save data
-            self._save_capture_data(frame, hand_crop, hand_crop_bg_removed, processed_hand, hand_info, prediction, confidence)
+            self._save_capture_data(frame, hand_crop, hand_crop_bg_removed, model_input_vis, hand_info, prediction, confidence)
             
         except Exception as e:
             logger.error(f"Error in capture visualization: {e}")
@@ -373,30 +362,31 @@ class LiveASLRecognizer:
     
     def _plot_unified_color_distribution(self, ax, image: np.ndarray, title: str, 
                                         title_fontsize: int, title_color: str, mask=None):
-        """Unified color distribution plotting with consistent style."""
+        """Unified color distribution plotting with consistent style and BGR handling."""
         if image is None or image.size == 0:
             ax.text(0.5, 0.5, 'No Data', ha='center', va='center', fontsize=10)
             ax.set_title(title, fontsize=title_fontsize, fontweight='bold', color=title_color)
             ax.axis('off')
             return
 
-        colors = ['#e74c3c', '#27ae60', '#3498db']  # Consistent colors
-        labels = ['Red', 'Green', 'Blue']
+        # CONSISTENT BGR HANDLING: Use same order for both plots
+        colors = ['#3498db', '#27ae60', '#e74c3c']  # BGR order: Blue, Green, Red
+        labels = ['Blue', 'Green', 'Red']  # BGR order
         
-        # Calculate mean intensity safely
+        # Calculate mean intensity safely (BGR order)
         if mask is not None and np.any(mask):
-            mean_intensity = cv2.mean(image, mask=mask)[:3]
+            mean_intensity = cv2.mean(image, mask=mask)[:3]  # BGR order
         else:
-            mean_intensity = cv2.mean(image)[:3]
+            mean_intensity = cv2.mean(image)[:3]  # BGR order
 
-        # Plot histograms with unified style
+        # Plot histograms with unified style (BGR order)
         for i, (color, label) in enumerate(zip(colors, labels)):
             hist = cv2.calcHist([image], [i], mask, [256], [0, 256])
             hist = hist.flatten()
             if hist.max() > 0:
                 hist = hist / hist.max()  # Normalize
             ax.plot(hist, color=color, alpha=0.7, linewidth=2, 
-                   label=f'{label} ({int(mean_intensity[2-i])})')  # BGR to RGB order
+                   label=f'{label} ({int(mean_intensity[i])})')  # Keep BGR order: i=0->Blue, i=1->Green, i=2->Red
         
         ax.set_xlim(0, 255)
         ax.set_ylim(0, 1.0)
