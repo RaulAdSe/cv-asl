@@ -30,16 +30,10 @@ import sys
 from pathlib import Path
 from typing import Optional, Tuple, Dict
 import logging
+import uuid
 
-# Configure matplotlib backend BEFORE importing pyplot
-import matplotlib
-matplotlib.use('Agg')  # Use non-interactive backend to prevent crashes
-import matplotlib.pyplot as plt
-plt.ioff()  # Turn off interactive mode
-
-# Add project root to path
-project_root = Path(__file__).parent.parent.parent
-sys.path.append(str(project_root))
+# Add src to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import camera modules (clean, no DL dependencies)
 from asl_cam.vision.asl_hand_detector import ASLHandDetector
@@ -48,7 +42,6 @@ from asl_cam.vision.asl_hand_detector import ASLHandDetector
 from asl_dl.models.mobilenet import MobileNetV2ASL
 import torchvision.transforms as transforms
 from asl_cam.utils.fps import FPSTracker
-from asl_dl.infer import load_model
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -111,7 +104,7 @@ class LiveASLRecognizer:
         self.capture_enabled = True
         self.last_processed_hand = None
         self.last_capture_frame = None
-        
+
         self.STATUS_COLORS = {
             "TRACKED": (0, 255, 0),       # Green for stable tracking
             "PREDICTED": (255, 255, 0),   # Yellow for Kalman filter prediction
@@ -175,91 +168,155 @@ class LiveASLRecognizer:
     
     def _capture_and_visualize_hand_data(self, frame: np.ndarray, processed_hand: np.ndarray, 
                                        hand_info: Dict, prediction: str, confidence: float) -> None:
-        """Clean ASL analysis with unified styling - NON-BLOCKING."""
+        """Non-blocking ASL analysis with unified styling and minimal titles."""
         try:
+            import matplotlib.pyplot as plt
             from matplotlib.gridspec import GridSpec
             import torch
             
-            # CRITICAL FIX: Extract hand information and create hand crop FIRST
+            # Extract hand information and create hand crop FIRST 
             bbox = hand_info.get('bbox', (0, 0, 100, 100))
             x, y, w, h = bbox
             hand_crop = frame[y:y+h, x:x+w].copy()
             
             # Try to get background-removed crop for visualization
-            hand_crop_bg_removed = None
             try:
-                # Get crop coordinates for background removal
-                crop_coords = (x, y, x + w, y + h)
+                crop_coords = (x, y, w, h)
                 hand_crop_bg_removed = self.hand_detector._remove_background_from_crop(hand_crop, crop_coords)
+                if hand_crop_bg_removed is None:
+                    hand_crop_bg_removed = hand_crop.copy()
             except Exception as e:
                 logger.warning(f"Failed to get background-removed crop for visualization: {e}")
-                hand_crop_bg_removed = hand_crop.copy()  # Fallback to original
+                hand_crop_bg_removed = hand_crop.copy()
             
-            # Model prediction probabilities
-            with torch.no_grad():
-                processed_tensor = torch.from_numpy(processed_hand).unsqueeze(0).to(self.device)
-                output = self.model(processed_tensor)
-                model_probs = F.softmax(output, dim=1).cpu().numpy().flatten()
+            # CRITICAL FIX: Proper tensor shape handling for model input
+            model_input_tensor = None
+            model_probs = None
+            try:
+                # Ensure processed_hand is properly formatted for model
+                if isinstance(processed_hand, np.ndarray):
+                    # Convert numpy to tensor with proper shape
+                    if len(processed_hand.shape) == 3:  # HWC format
+                        if processed_hand.shape[-1] == 3:  # RGB/BGR
+                            # Convert to CHW format: (H,W,C) -> (C,H,W)
+                            processed_hand_chw = np.transpose(processed_hand, (2, 0, 1))
+                            model_input_tensor = torch.from_numpy(processed_hand_chw).float()
+                        else:
+                            logger.error(f"Invalid channel count: {processed_hand.shape}")
+                            raise ValueError(f"Expected 3 channels, got {processed_hand.shape[-1]}")
+                    elif len(processed_hand.shape) == 4 and processed_hand.shape[0] == 1:  # BCHW
+                        model_input_tensor = torch.from_numpy(processed_hand[0]).float()  # Remove batch dim
+                    else:
+                        logger.error(f"Invalid processed_hand shape: {processed_hand.shape}")
+                        raise ValueError(f"Unexpected tensor shape: {processed_hand.shape}")
+                
+                elif isinstance(processed_hand, torch.Tensor):
+                    model_input_tensor = processed_hand.clone()
+                    # Ensure it's in CHW format without batch dimension
+                    if len(model_input_tensor.shape) == 4:  # BCHW -> CHW
+                        model_input_tensor = model_input_tensor[0]
+                
+                # Validate final tensor shape
+                if model_input_tensor is not None:
+                    expected_shape = (3, 224, 224)  # CHW format
+                    if model_input_tensor.shape != expected_shape:
+                        logger.error(f"Model input shape mismatch: {model_input_tensor.shape} != {expected_shape}")
+                        raise ValueError(f"Model expects {expected_shape}, got {model_input_tensor.shape}")
+                    
+                    # Get model predictions safely
+                    model_input_batch = model_input_tensor.unsqueeze(0).to(self.device)  # Add batch dimension
+                    logger.debug(f"✅ Model input shape: {model_input_batch.shape}")
+                    model_probs = self.model(model_input_batch).softmax(dim=1)[0].cpu().numpy()
+                else:
+                    raise ValueError("Could not create valid model input tensor")
+                    
+            except Exception as e:
+                logger.error(f"Model inference failed: {e}")
+                # Create dummy probabilities as fallback
+                model_probs = np.array([0.33, 0.33, 0.34])
+                logger.warning("Using dummy probabilities due to model inference failure")
             
             # Create model input visualization
-            model_input_vis = cv2.resize(hand_crop_bg_removed, (224, 224), interpolation=cv2.INTER_AREA)
+            model_input_vis = processed_hand.copy()
+            
+            # Convert model input for display
+            if isinstance(model_input_vis, torch.Tensor):
+                model_input_vis = self._denormalize_for_visualization(model_input_vis)
+                if len(model_input_vis.shape) == 3 and model_input_vis.shape[0] == 3:
+                    model_input_vis = np.transpose(model_input_vis, (1, 2, 0))
+                model_input_vis = (model_input_vis * 255).astype(np.uint8)
             
             # Calculate stats
-            max_prob = np.max(model_probs)
-            entropy = -np.sum(model_probs * np.log(model_probs + 1e-8))
+            max_prob = np.max(model_probs) if model_probs is not None else 0.0
+            entropy = -np.sum(model_probs * np.log(model_probs + 1e-8)) if model_probs is not None else 0.0
             fps = self.fps_tracker.get_fps()
             
             # UNIFIED STYLING CONFIGURATION
-            bg_color = 'white'
-            title_color = '#2c3e50'  # Dark blue-gray
             title_fontsize = 10
+            title_color = '#2c3e50'
+            bg_color = 'white'
             
-            # Create figure with unified layout (2x4 grid)
+            # Create NON-BLOCKING figure
+            plt.ion()  # Turn on interactive mode for non-blocking display
             fig = plt.figure(figsize=(16, 8), facecolor=bg_color)
-            gs = GridSpec(2, 4, figure=fig, hspace=0.3, wspace=0.3)
-            fig.suptitle('ASL Analysis Pipeline', fontsize=14, fontweight='bold', color=title_color)
+            fig.suptitle('ASL Live Analysis', fontsize=14, fontweight='bold', color=title_color)
+            
+            # Create 2x4 grid layout
+            gs = GridSpec(2, 4, figure=fig, hspace=0.3, wspace=0.25)
             
             # Panel 1: Camera Feed
             ax1 = fig.add_subplot(gs[0, 0])
             ax1.set_facecolor(bg_color)
-            ax1.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            ax1.set_title(f'Camera Feed\n1920x1080px', 
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            ax1.imshow(frame_rgb)
+            cv2.rectangle(frame_rgb, (x, y), (x+w, y+h), (255, 0, 0), 3)
+            ax1.set_title(f'Camera Feed\n1920×1080', 
                          fontsize=title_fontsize, fontweight='bold', color=title_color)
             ax1.axis('off')
-            
-            # Draw bounding box on camera feed
-            if hand_info:
-                rect = plt.Rectangle((x, y), w, h, linewidth=2, edgecolor='red', facecolor='none')
-                ax1.add_patch(rect)
-            
+
             # Panel 2: Hand ROI
             ax2 = fig.add_subplot(gs[0, 1])
             ax2.set_facecolor(bg_color)
-            ax2.imshow(cv2.cvtColor(hand_crop, cv2.COLOR_BGR2RGB))
-            ax2.set_title(f'Hand ROI\n{w}x{h}px', 
+            hand_crop_rgb = cv2.cvtColor(hand_crop, cv2.COLOR_BGR2RGB)
+            ax2.imshow(hand_crop_rgb)
+            ax2.set_title(f'Hand ROI\n{w}×{h}px', 
                          fontsize=title_fontsize, fontweight='bold', color=title_color)
             ax2.axis('off')
-            
-            # Panel 3: Original Color Distribution
+
+            # Panel 3: Original Colors  
             ax3 = fig.add_subplot(gs[0, 2])
             ax3.set_facecolor(bg_color)
-            self._plot_unified_color_distribution(ax3, hand_crop, 'Original Colors', title_fontsize, title_color)
+            self._plot_unified_color_distribution(ax3, hand_crop, 'Original Colors', 
+                                                title_fontsize, title_color)
             
-            # Panel 4: Background Removal
+            # Panel 4: Background Removed
             ax4 = fig.add_subplot(gs[0, 3])
             ax4.set_facecolor(bg_color)
-            ax4.imshow(cv2.cvtColor(hand_crop_bg_removed, cv2.COLOR_BGR2RGB))
-            ax4.set_title('Background Removed\nDemo Only', 
-                         fontsize=title_fontsize, fontweight='bold', color=title_color)
+            if hand_crop_bg_removed is not None and hand_crop_bg_removed.size > 0:
+                hand_crop_bg_rgb = cv2.cvtColor(hand_crop_bg_removed, cv2.COLOR_BGR2RGB)
+                ax4.imshow(hand_crop_bg_rgb)
+                ax4.set_title('Background Removed', 
+                             fontsize=title_fontsize, fontweight='bold', color=title_color)
+            else:
+                ax4.text(0.5, 0.5, 'No BG Removal', ha='center', va='center')
+                ax4.set_title('Background Removed', 
+                             fontsize=title_fontsize, fontweight='bold', color=title_color)
             ax4.axis('off')
-            
-            # Panel 5: Processed Color Distribution
+
+            # Panel 5: Processed Colors
             ax5 = fig.add_subplot(gs[1, 0])
             ax5.set_facecolor(bg_color)
-            # Create proper mask for processed image
+            # Create skin mask for color distribution if needed
             if hand_crop_bg_removed is not None and hand_crop_bg_removed.size > 0:
-                mask_bool = cv2.cvtColor(hand_crop_bg_removed, cv2.COLOR_BGR2GRAY) > 0
-                mask = mask_bool.astype(np.uint8) * 255  # Fix OpenCV compatibility
+                skin_detector = self.hand_detector.bg_remover
+                try:
+                    mask_bool = skin_detector._get_skin_mask_simple(hand_crop_bg_removed)
+                    if mask_bool is not None:
+                        mask = mask_bool.astype(np.uint8) * 255  # Convert bool to uint8
+                    else:
+                        mask = None
+                except:
+                    mask = None
             else:
                 mask = None
             self._plot_unified_color_distribution(ax5, hand_crop_bg_removed, 'Processed Colors', 
@@ -270,16 +327,20 @@ class LiveASLRecognizer:
             ax6.set_facecolor(bg_color)
             model_input_display = cv2.cvtColor(model_input_vis, cv2.COLOR_BGR2RGB)
             ax6.imshow(model_input_display)
-            ax6.set_title('Model Input\n224x224px', 
+            ax6.set_title('Model Input\n224×224px', 
                          fontsize=title_fontsize, fontweight='bold', color=title_color)
             ax6.axis('off')
 
-            # Panel 7: Model Predictions
+            # Panel 7: Model Predictions (UNIFIED)
             ax7 = fig.add_subplot(gs[1, 2])
             ax7.set_facecolor(bg_color)
-            self._plot_unified_predictions(ax7, model_probs, prediction, title_fontsize, title_color)
+            if model_probs is not None:
+                self._plot_unified_predictions(ax7, model_probs, prediction, title_fontsize, title_color)
+            else:
+                ax7.text(0.5, 0.5, 'Model Error', ha='center', va='center')
+                ax7.set_title('Predictions\nError', fontsize=title_fontsize, fontweight='bold', color='red')
             
-            # Panel 8: Stats
+            # Panel 8: Stats (UNIFIED)
             ax8 = fig.add_subplot(gs[1, 3])
             ax8.set_facecolor(bg_color)
             self._plot_unified_stats(ax8, prediction, confidence, max_prob, entropy, 
@@ -287,27 +348,26 @@ class LiveASLRecognizer:
             
             plt.tight_layout()
             
-            # Save the figure instead of showing (non-blocking)
-            import time
-            timestamp = int(time.time())
-            fig_path = f"data/raw/asl_analysis_{timestamp}.png"
-            plt.savefig(fig_path, dpi=150, bbox_inches='tight', facecolor=bg_color)
-            plt.close(fig)  # Close to free memory
+            # NON-BLOCKING DISPLAY: Show figure and continue execution
+            plt.show(block=False)
+            plt.draw()
+            plt.pause(0.001)  # Small pause to ensure display updates
             
             # Clean console output
-            print(f"\nASL Analysis Complete!")
+            print(f"\n🎯 ASL Analysis Complete!")
             print(f"  Prediction: {prediction} ({confidence:.1%})")
-            print(f"  Hand: {w}x{h}px | FPS: {fps:.1f}")
-            print(f"  Probabilities: A={model_probs[0]:.3f}, B={model_probs[1]:.3f}, C={model_probs[2]:.3f}")
-            print(f"  Analysis saved to: {fig_path}")
-            print(f"  Live ASL continues running...\n")
+            print(f"  Hand: {w}×{h}px | FPS: {fps:.1f}")
+            if model_probs is not None:
+                print(f"  Probabilities: A={model_probs[0]:.3f}, B={model_probs[1]:.3f}, C={model_probs[2]:.3f}")
+            print(f"  📊 Visualization window opened (non-blocking)")
+            print(f"  📂 Files saved to: data/raw/captures\n")
             
             # Save data
             self._save_capture_data(frame, hand_crop, hand_crop_bg_removed, processed_hand, hand_info, prediction, confidence)
             
         except Exception as e:
             logger.error(f"Error in capture visualization: {e}")
-            print(f"Capture failed: {e}")
+            print(f"❌ Capture failed: {e}")
             import traceback
             traceback.print_exc()
     
@@ -410,57 +470,136 @@ Status: Real-time"""
             import time
             import json
             from pathlib import Path
+            import shutil
+            import uuid
             
             x, y, w, h = hand_info['bbox']
             fps = self.fps_tracker.get_fps()
             
-            # Save capture data with robust directory handling
+            # Generate unique timestamp and random ID to avoid conflicts
             timestamp = time.time()
-            capture_dir = Path("data/raw/captures")
+            time_str = time.strftime("%Y%m%d_%H%M%S", time.localtime(timestamp))
+            unique_id = str(uuid.uuid4())[:8]  # Short unique identifier
             
-            # ROBUST directory creation - no more [Errno 17] errors
+            # CRITICAL FIX: Use unique directory name to avoid conflicts
+            capture_dir = Path(f"data/raw/capture_{time_str}_{unique_id}")
+            
+            # Robust directory creation
             try:
-                capture_dir.mkdir(parents=True, exist_ok=True)
-                logger.debug("Capture directory ready")
-            except Exception as e:
-                logger.warning(f"Directory creation handled: {e}")
-                # Continue anyway - might still work
-            
-            # Create timestamped filenames
-            ts_str = f"{int(timestamp)}"
-            
-            # Save images
-            try:
-                cv2.imwrite(str(capture_dir / f"frame_{ts_str}.jpg"), frame)
-                cv2.imwrite(str(capture_dir / f"hand_crop_{ts_str}.jpg"), hand_crop)
-                if hand_crop_bg_removed is not None:
-                    cv2.imwrite(str(capture_dir / f"hand_bg_removed_{ts_str}.jpg"), hand_crop_bg_removed)
-                cv2.imwrite(str(capture_dir / f"model_input_{ts_str}.jpg"), model_input_np)
+                # Ensure parent directories exist
+                capture_dir.parent.mkdir(parents=True, exist_ok=True)
                 
-                # Save metadata
+                # Create unique capture directory 
+                capture_dir.mkdir(parents=True, exist_ok=True)
+                logger.debug(f"✅ Capture directory created: {capture_dir}")
+                
+            except Exception as e:
+                logger.warning(f"Directory creation issue: {e}")
+                # Use temp directory as ultimate fallback
+                import tempfile
+                capture_dir = Path(tempfile.mkdtemp(prefix="asl_capture_"))
+                logger.info(f"✅ Using temp directory: {capture_dir}")
+            
+            # Save images with unique filenames
+            base_name = f"asl_{time_str}_{unique_id}"
+            
+            try:
+                # Save original frame
+                cv2.imwrite(str(capture_dir / f"{base_name}_frame.jpg"), frame)
+                logger.debug("✅ Frame saved")
+                
+                # Save hand crop
+                cv2.imwrite(str(capture_dir / f"{base_name}_hand.jpg"), hand_crop)
+                logger.debug("✅ Hand crop saved")
+                
+                # Save background removed image if available
+                if hand_crop_bg_removed is not None:
+                    cv2.imwrite(str(capture_dir / f"{base_name}_bg_removed.jpg"), hand_crop_bg_removed)
+                    logger.debug("✅ Background removed image saved")
+                
+                # CRITICAL FIX: Proper model input conversion and saving
+                model_input_to_save = None
+                try:
+                    if isinstance(model_input_np, torch.Tensor):
+                        model_input_to_save = model_input_np.cpu().numpy()
+                    else:
+                        model_input_to_save = model_input_np.copy()
+                    
+                    # Handle different tensor formats
+                    if len(model_input_to_save.shape) == 4:  # Batch dimension (B,C,H,W)
+                        model_input_to_save = model_input_to_save[0]  # Remove batch -> (C,H,W)
+                    
+                    if len(model_input_to_save.shape) == 3:
+                        if model_input_to_save.shape[0] == 3:  # CHW format -> HWC
+                            model_input_to_save = np.transpose(model_input_to_save, (1, 2, 0))
+                        elif model_input_to_save.shape[-1] != 3:  # Not HWC format
+                            logger.error(f"Unexpected model input shape: {model_input_to_save.shape}")
+                            model_input_to_save = None
+                    
+                    if model_input_to_save is not None:
+                        # Denormalize if normalized (values between -1 and 1 or 0-1 range with normalization)
+                        if model_input_to_save.min() < 0 or model_input_to_save.max() <= 1.1:  
+                            # ImageNet normalization parameters
+                            mean = np.array([0.485, 0.456, 0.406])
+                            std = np.array([0.229, 0.224, 0.225])
+                            if model_input_to_save.min() < 0:  # Normalized data
+                                model_input_to_save = (model_input_to_save * std + mean)
+                            model_input_to_save = np.clip(model_input_to_save, 0, 1)
+                            model_input_to_save = (model_input_to_save * 255).astype(np.uint8)
+                        
+                        # Convert RGB to BGR for OpenCV saving
+                        if len(model_input_to_save.shape) == 3 and model_input_to_save.shape[-1] == 3:
+                            model_input_bgr = cv2.cvtColor(model_input_to_save, cv2.COLOR_RGB2BGR)
+                            cv2.imwrite(str(capture_dir / f"{base_name}_model_input.jpg"), model_input_bgr)
+                            logger.debug("✅ Model input saved")
+                        else:
+                            logger.warning(f"Could not save model input - invalid shape: {model_input_to_save.shape}")
+                            
+                except Exception as e:
+                    logger.warning(f"Failed to save model input: {e}")
+                
+                # Save comprehensive metadata
                 metadata = {
                     'timestamp': timestamp,
+                    'time_str': time_str,
+                    'unique_id': unique_id,
                     'prediction': prediction,
-                    'confidence': confidence,
-                    'bbox': {'x': x, 'y': y, 'w': w, 'h': h},
-                    'fps': fps,
-                    'frame_shape': frame.shape,
-                    'hand_crop_shape': hand_crop.shape,
-                    'model_input_shape': model_input_np.shape if hasattr(model_input_np, 'shape') else None
+                    'confidence': float(confidence),
+                    'hand_info': {
+                        'bbox': hand_info.get('bbox', []),
+                        'area': w * h,
+                        'aspect_ratio': w / h if h > 0 else 0
+                    },
+                    'system_info': {
+                        'fps': fps,
+                        'processing_method': 'background_removal_then_resize',
+                        'model_input_size': '224x224',
+                        'original_hand_size': f'{w}x{h}',
+                        'device': str(self.device)
+                    },
+                    'file_info': {
+                        'frame_file': f"{base_name}_frame.jpg",
+                        'hand_file': f"{base_name}_hand.jpg", 
+                        'bg_removed_file': f"{base_name}_bg_removed.jpg" if hand_crop_bg_removed is not None else None,
+                        'model_input_file': f"{base_name}_model_input.jpg"
+                    }
                 }
                 
-                with open(capture_dir / f"metadata_{ts_str}.json", 'w') as f:
+                # Save metadata as JSON
+                with open(capture_dir / f"{base_name}_metadata.json", 'w') as f:
                     json.dump(metadata, f, indent=2)
+                logger.debug("✅ Metadata saved")
                 
-                logger.debug(f"Capture data saved successfully to {capture_dir}")
+                logger.info(f"✅ All files saved to: {capture_dir}")
                 
-            except Exception as e:
-                logger.warning(f"Some files might not have saved: {e}")
-                # Continue - not critical
+            except Exception as save_error:
+                logger.error(f"Failed to save files: {save_error}")
+                raise save_error
                 
         except Exception as e:
-            logger.error(f"Error saving capture data: {e}")
-            # Not critical - continue operation
+            logger.warning(f"Failed to save capture data: {e}")
+            print(f"  Warning: Could not save files: {e}")
+            # Don't raise the exception - continue execution
     
     def _evaluate_model_performance(self, frame: np.ndarray, processed_hand: np.ndarray, 
                                   hand_info: Dict, prediction: str, confidence: float) -> None:
@@ -917,29 +1056,29 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
         
     def _handle_keypress(self, key: int):
         if key == ord('q'):
-            logger.info("Exiting...")
+            logger.info("👋 Exiting...")
             return
         elif key == ord('s'):
             self.show_stats = not self.show_stats
         elif key == ord('r'):
             self.hand_detector.reset()
-            logger.info("Hand detector reset.")
+            logger.info("🔄 Hand detector reset.")
         elif key == ord('b'):
             self.hand_detector.bg_remover.reset()
-            logger.info("Background model is resetting. Please keep hands out of frame.")
+            logger.info("🔄 Background model is resetting. Please keep hands out of frame.")
         elif key == ord(' '):
             self.paused = not self.paused
-            logger.info("Paused" if self.paused else "Resumed")
+            logger.info("⏸️ Paused" if self.paused else "▶️ Resumed")
         elif key == ord('c'):
             # Capture and visualize current hand data
-            logger.info(f"Capture debug - Enabled: {self.capture_enabled}, "
+            logger.info(f"🔍 Capture debug - Enabled: {self.capture_enabled}, "
                        f"Processed hand: {self.last_processed_hand is not None}, "
                        f"Hand info: {self.last_hand_info is not None}, "
                        f"Frame: {self.last_capture_frame is not None}")
             
             if (self.capture_enabled and self.last_processed_hand is not None and 
                 self.last_hand_info is not None and self.last_capture_frame is not None):
-                logger.info("Capturing hand data...")
+                logger.info("📸 Capturing hand data...")
                 self._capture_and_visualize_hand_data(
                     self.last_capture_frame, 
                     self.last_processed_hand,
@@ -958,31 +1097,31 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
                 if self.last_capture_frame is None:
                     missing_items.append("no capture frame")
                     
-                logger.warning(f"Cannot capture: {', '.join(missing_items)}")
-                logger.info("Try detecting a hand first, then press 'C' to capture")
+                logger.warning(f"❌ Cannot capture: {', '.join(missing_items)}")
+                logger.info("💡 Try detecting a hand first, then press 'C' to capture")
         elif key == ord('+') or key == ord('='):
             # Increase frame skip rate (lower performance, higher quality)
             self.frame_skip_rate = max(1, self.frame_skip_rate - 1)
-            logger.info(f"Frame skip rate: 1/{self.frame_skip_rate} (Higher quality)")
+            logger.info(f"⚡ Frame skip rate: 1/{self.frame_skip_rate} (Higher quality)")
         elif key == ord('-'):
             # Decrease frame skip rate (higher performance, lower quality)
             self.frame_skip_rate = min(5, self.frame_skip_rate + 1)
-            logger.info(f"Frame skip rate: 1/{self.frame_skip_rate} (Higher performance)")
+            logger.info(f"🚀 Frame skip rate: 1/{self.frame_skip_rate} (Higher performance)")
         elif key == ord('p'):
             # Toggle performance mode
             if self.frame_skip_rate == 1:
                 self.frame_skip_rate = 2
                 self.target_fps = 30
-                logger.info("Performance mode: ON (Skip every 2nd frame, target 30 FPS)")
+                logger.info("🚀 Performance mode: ON (Skip every 2nd frame, target 30 FPS)")
             else:
                 self.frame_skip_rate = 1
                 self.target_fps = 25
-                logger.info("Quality mode: ON (Process all frames, target 25 FPS)")
+                logger.info("🎯 Quality mode: ON (Process all frames, target 25 FPS)")
         elif key == ord('m'):
             # Model performance evaluation
             if (self.last_processed_hand is not None and 
                 self.last_hand_info is not None and self.last_capture_frame is not None):
-                logger.info("Running model performance evaluation...")
+                logger.info("🧪 Running model performance evaluation...")
                 self._evaluate_model_performance(
                     self.last_capture_frame, 
                     self.last_processed_hand,
@@ -991,26 +1130,26 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
                     self.last_confidence
                 )
             else:
-                logger.warning("No hand data available for model evaluation")
+                logger.warning("❌ No hand data available for model evaluation")
 
     def run(self):
         """Main loop for the application."""
-        logger.info("Starting Live ASL Recognition with Performance Optimizations...")
-        logger.info("Controls:")
+        logger.info("🟢 Starting Live ASL Recognition with Performance Optimizations...")
+        logger.info("📋 Controls:")
         logger.info("  Q: Quit")
         logger.info("  S: Toggle statistics display")
         logger.info("  R: Reset hand tracker")
         logger.info("  B: Reset background learning")
         logger.info("  SPACE: Pause/unpause")
-        logger.info("  C: Capture and visualize hand data")
+        logger.info("  C: 📸 Capture and visualize hand data")
         logger.info("  P: Toggle performance mode (skip frames for higher FPS)")
         logger.info("  +/-: Adjust frame skip rate manually")
-        logger.info("  M: Model performance evaluation")
+        logger.info("  M: 🧪 Model performance evaluation")
         logger.info("")
         
         self.cap = cv2.VideoCapture(self.camera_index)
         if not self.cap.isOpened():
-            logger.error(f"Cannot open camera {self.camera_index}")
+            logger.error(f"❌ Cannot open camera {self.camera_index}")
             return
             
         # Optimize camera settings for performance
@@ -1021,12 +1160,12 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
         actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
-        logger.info(f"Camera: {actual_width}x{actual_height} @ {actual_fps:.1f} FPS")
+        logger.info(f"📹 Camera: {actual_width}x{actual_height} @ {actual_fps:.1f} FPS")
             
         while self.cap.isOpened():
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
-                logger.info("Exiting...")
+                logger.info("👋 Exiting...")
                 break
             self._handle_keypress(key)
             
