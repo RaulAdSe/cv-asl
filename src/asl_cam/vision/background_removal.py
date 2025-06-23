@@ -119,7 +119,17 @@ class BackgroundRemover:
         return foreground_img, final_mask
 
     def reset(self):
-        """Resets the background model."""
-        self.__init__(learning_rate=self.learning_rate, history=self.history, threshold=self.bg_subtractor.getVarThreshold())
-        self.background_image = None # Reset the captured image
+        """Resets the background model without creating a new MOG2 instance."""
+        # Store current settings
+        current_threshold = self.bg_subtractor.getVarThreshold()
+        
+        # Reset the learning state
+        self.bg_model_learned = False
+        self.frames_learned = 0
+        self.background_image = None
+        
+        # Clear the background model but keep the same MOG2 instance
+        # This is safer than creating a new instance which can cause tracking instability
+        self.bg_subtractor.clear()
+        
         logger.info("BackgroundRemover has been reset.") 
