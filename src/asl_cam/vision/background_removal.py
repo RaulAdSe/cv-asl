@@ -39,6 +39,7 @@ class BackgroundRemover:
         self.bg_model_learned = False
         self.frames_learned = 0
         self.history = history
+        self.background_image: Optional[np.ndarray] = None
 
         # Kernels for cleaning up the foreground mask
         self.open_kernel = np.ones((5, 5), np.uint8)
@@ -64,7 +65,9 @@ class BackgroundRemover:
         # Consider the model learned after enough frames
         if self.frames_learned >= self.history:
             self.bg_model_learned = True
-            logger.info("✅ Background model has been learned.")
+            # CRITICAL: Capture the learned background image
+            self.background_image = self.bg_subtractor.getBackgroundImage()
+            logger.info("✅ Background model learned and static background image captured.")
 
     def get_progress(self) -> float:
         """Returns the background learning progress as a percentage."""
@@ -116,6 +119,17 @@ class BackgroundRemover:
         return foreground_img, final_mask
 
     def reset(self):
-        """Resets the background model."""
-        self.__init__(learning_rate=self.learning_rate, history=self.history, threshold=self.bg_subtractor.getVarThreshold())
+        """Resets the background model without creating a new MOG2 instance."""
+        # Store current settings
+        current_threshold = self.bg_subtractor.getVarThreshold()
+        
+        # Reset the learning state
+        self.bg_model_learned = False
+        self.frames_learned = 0
+        self.background_image = None
+        
+        # Clear the background model but keep the same MOG2 instance
+        # This is safer than creating a new instance which can cause tracking instability
+        self.bg_subtractor.clear()
+        
         logger.info("BackgroundRemover has been reset.") 
