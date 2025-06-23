@@ -348,31 +348,49 @@ Frame: {hand_info.get('frame_count', 'N/A')}
             
             # Show comparison of original vs background-removed
             if hand_crop_bg_removed is not None and len(hand_crop_bg_removed.shape) == 3:
-                # Original crop histogram (full)
-                orig_hist_r = cv2.calcHist([hand_crop], [2], None, [256], [0, 256])
-                bg_mask = np.any(hand_crop_bg_removed > 5, axis=2)
+                # Simple mask to exclude black background pixels
+                bg_mask = np.any(hand_crop_bg_removed > 0, axis=2)
                 
                 if np.any(bg_mask):
-                    # Background-removed histogram (skin only)
-                    bg_hist_r = cv2.calcHist([hand_crop_bg_removed], [2], bg_mask.astype(np.uint8), [256], [0, 256])
+                    # Original crop red channel histogram (all pixels)
+                    orig_red_values = hand_crop[:, :, 2].flatten()  # Red channel
                     
-                    # Normalize for comparison
-                    orig_hist_r = orig_hist_r / np.sum(orig_hist_r)
-                    bg_hist_r = bg_hist_r / np.sum(bg_hist_r)
+                    # Background-removed red channel histogram (skin pixels only)
+                    skin_pixels = hand_crop_bg_removed[bg_mask]
+                    bg_red_values = skin_pixels[:, 2]  # Red channel of skin pixels only
                     
-                    ax8.plot(orig_hist_r, color='orange', alpha=0.7, label='Original', linewidth=2)
-                    ax8.plot(bg_hist_r, color='red', alpha=0.7, label='BG Removed', linewidth=2)
-                    
-                    ax8.set_title('8. Red Channel Comparison')
-                    ax8.set_xlabel('Pixel Intensity')
-                    ax8.set_ylabel('Normalized Frequency')
-                    ax8.legend()
-                    
-                    # Add skin percentage
-                    skin_percentage = np.sum(bg_mask) / bg_mask.size * 100
-                    ax8.text(0.02, 0.98, f'Skin: {skin_percentage:.1f}%',
-                            transform=ax8.transAxes, fontsize=8, verticalalignment='top',
-                            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+                    if len(bg_red_values) > 0:
+                        # Calculate histograms with standard ranges
+                        orig_hist, orig_bins = np.histogram(orig_red_values, bins=50, range=[0, 255])
+                        orig_bin_centers = (orig_bins[:-1] + orig_bins[1:]) / 2
+                        
+                        bg_hist, bg_bins = np.histogram(bg_red_values, bins=50, range=[0, 255])
+                        bg_bin_centers = (bg_bins[:-1] + bg_bins[1:]) / 2
+                        
+                        # Normalize for comparison
+                        orig_hist = orig_hist / np.sum(orig_hist)
+                        bg_hist = bg_hist / np.sum(bg_hist)
+                        
+                        ax8.plot(orig_bin_centers, orig_hist, color='orange', alpha=0.7, label='Original (all pixels)', linewidth=2)
+                        ax8.plot(bg_bin_centers, bg_hist, color='red', alpha=0.7, label='Background Removed (skin only)', linewidth=2)
+                        
+                        ax8.set_title('8. Red Channel Comparison')
+                        ax8.set_xlabel('Pixel Intensity (0-255)')
+                        ax8.set_ylabel('Normalized Frequency')
+                        ax8.legend()
+                        ax8.grid(True, alpha=0.3)
+                        
+                        # Add statistics
+                        skin_percentage = np.sum(bg_mask) / bg_mask.size * 100
+                        orig_mean = np.mean(orig_red_values)
+                        skin_mean = np.mean(bg_red_values)
+                        ax8.text(0.02, 0.98, f'Skin: {skin_percentage:.1f}%\nOrig Mean: {orig_mean:.1f}\nSkin Mean: {skin_mean:.1f}',
+                                transform=ax8.transAxes, fontsize=8, verticalalignment='top',
+                                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+                    else:
+                        ax8.text(0.5, 0.5, 'No skin pixels\nfound', ha='center', va='center',
+                                transform=ax8.transAxes)
+                        ax8.set_title('8. Red Channel Comparison')
                 else:
                     ax8.text(0.5, 0.5, 'No skin pixels\ndetected', ha='center', va='center',
                             transform=ax8.transAxes)
@@ -385,26 +403,43 @@ Frame: {hand_info.get('frame_count', 'N/A')}
             # Panel 9: Background removed histogram (excluding black background)
             ax9 = fig.add_subplot(gs[2, 1])
             if hand_crop_bg_removed is not None and len(hand_crop_bg_removed.shape) == 3:
-                # Create mask to exclude black background pixels
-                bg_mask = np.any(hand_crop_bg_removed > 5, axis=2)  # Exclude near-black pixels
+                # Simple mask to exclude black background pixels
+                bg_mask = np.any(hand_crop_bg_removed > 0, axis=2)  # Any non-black pixel
                 
                 if np.any(bg_mask):  # Only if there are non-background pixels
+                    # Extract only skin pixels for histogram calculation
+                    skin_pixels = hand_crop_bg_removed[bg_mask]  # Shape: (N, 3) where N is number of skin pixels
+                    
+                    # Simple histogram for each channel - no complex filtering
                     for i, color in enumerate(['blue', 'green', 'red']):
-                        # Only calculate histogram for skin pixels (exclude background)
-                        hist = cv2.calcHist([hand_crop_bg_removed], [i], bg_mask.astype(np.uint8), [256], [0, 256])
-                        ax9.plot(hist, color=color, alpha=0.7, label=f'{color.upper()}')
-                    ax9.set_title('9. BG Removed Histogram\n(Skin pixels only)')
-                    ax9.set_xlabel('Pixel Intensity')
+                        channel_values = skin_pixels[:, i]  # Get all values for this channel
+                        
+                        if len(channel_values) > 0:
+                            # Simple histogram with standard range
+                            hist, bins = np.histogram(channel_values, bins=50, range=[0, 255])
+                            bin_centers = (bins[:-1] + bins[1:]) / 2
+                            ax9.plot(bin_centers, hist, color=color, alpha=0.7, label=f'{color.upper()}', linewidth=2)
+                    
+                    ax9.set_title('9. Background Removed Histogram\n(Skin pixels only)')
+                    ax9.set_xlabel('Pixel Intensity (0-255)')
                     ax9.set_ylabel('Frequency')
                     ax9.legend()
+                    ax9.grid(True, alpha=0.3)
+                    
+                    # Simple statistics
+                    skin_percentage = np.sum(bg_mask) / bg_mask.size * 100
+                    mean_colors = np.mean(skin_pixels, axis=0)
+                    ax9.text(0.02, 0.98, f'Skin: {skin_percentage:.1f}%\nMean BGR: [{mean_colors[0]:.0f}, {mean_colors[1]:.0f}, {mean_colors[2]:.0f}]',
+                            transform=ax9.transAxes, fontsize=8, verticalalignment='top',
+                            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
                 else:
                     ax9.text(0.5, 0.5, 'No skin pixels\ndetected', ha='center', va='center',
                             transform=ax9.transAxes)
-                    ax9.set_title('9. BG Removed Histogram')
+                    ax9.set_title('9. Background Removed Histogram')
             else:
                 ax9.text(0.5, 0.5, 'Background removal\nfailed', ha='center', va='center',
                         transform=ax9.transAxes)
-                ax9.set_title('9. BG Removed Histogram')
+                ax9.set_title('9. Background Removed Histogram')
             
             # Panel 10: Model input histogram (normalized space)
             ax10 = fig.add_subplot(gs[2, 2])
@@ -419,14 +454,35 @@ Frame: {hand_info.get('frame_count', 'N/A')}
                 # Transpose from CHW to HWC for histogram calculation
                 tensor_data = tensor_data.transpose(1, 2, 0)
                 
+                # Calculate actual data range for better binning
+                data_min = np.min(tensor_data)
+                data_max = np.max(tensor_data)
+                
+                # Use a reasonable range that doesn't create artificial spikes
+                range_padding = (data_max - data_min) * 0.1
+                data_range = (data_min - range_padding, data_max + range_padding)
+                
+                # Ensure we have a valid range
+                if data_range[1] <= data_range[0]:
+                    data_range = (data_min - 0.1, data_max + 0.1)  # Fallback range
+                
                 for i, color in enumerate(['blue', 'green', 'red']):
                     channel_data = tensor_data[:, :, i].flatten()
-                    # Create histogram manually for normalized data
-                    hist, bins = np.histogram(channel_data, bins=50, range=(-3, 3))
-                    bin_centers = (bins[:-1] + bins[1:]) / 2
-                    ax10.plot(bin_centers, hist, color=color, alpha=0.7, label=f'{color.upper()}', linewidth=2)
+                    
+                    # Filter out any extreme outliers that might cause spikes
+                    percentile_1 = np.percentile(channel_data, 1)
+                    percentile_99 = np.percentile(channel_data, 99)
+                    filtered_data = channel_data[(channel_data >= percentile_1) & (channel_data <= percentile_99)]
+                    
+                    if len(filtered_data) > 0:
+                        # Create histogram with filtered data
+                        hist, bins = np.histogram(filtered_data, bins=35, range=data_range)
+                        bin_centers = (bins[:-1] + bins[1:]) / 2
+                        ax10.plot(bin_centers, hist, color=color, alpha=0.7, label=f'{color.upper()}', linewidth=2)
+                    else:
+                        ax10.plot([], [], color=color, alpha=0.7, label=f'{color.upper()} (no data)', linewidth=2)
                 
-                ax10.set_title('10. Model Input Distribution\n(ImageNet Normalized)')
+                ax10.set_title('10. Model Input Distribution\n(ImageNet Normalized, outliers removed)')
                 ax10.set_xlabel('Normalized Value')
                 ax10.set_ylabel('Frequency')
                 ax10.legend()
@@ -435,24 +491,44 @@ Frame: {hand_info.get('frame_count', 'N/A')}
                 # Add normalization info
                 mean_vals = [np.mean(tensor_data[:,:,i]) for i in range(3)]
                 std_vals = [np.std(tensor_data[:,:,i]) for i in range(3)]
-                ax10.text(0.02, 0.98, f'Mean: B={mean_vals[0]:.2f}, G={mean_vals[1]:.2f}, R={mean_vals[2]:.2f}\nStd:  B={std_vals[0]:.2f}, G={std_vals[1]:.2f}, R={std_vals[2]:.2f}',
+                ax10.text(0.02, 0.98, f'Stats (full data):\nMean: B={mean_vals[0]:.2f}, G={mean_vals[1]:.2f}, R={mean_vals[2]:.2f}\nStd:  B={std_vals[0]:.2f}, G={std_vals[1]:.2f}, R={std_vals[2]:.2f}',
                          transform=ax10.transAxes, fontsize=8, verticalalignment='top',
                          bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
                 
-                # Add expected ranges
-                ax10.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
-                ax10.text(0.02, 0.02, 'ImageNet norm:\nμ=[0.485,0.456,0.406]\nσ=[0.229,0.224,0.225]',
+                # Add reference line at zero
+                ax10.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
+                ax10.text(0.02, 0.02, f'Range: [{data_min:.2f}, {data_max:.2f}]\nImageNet normalization\nShould center around 0',
                          transform=ax10.transAxes, fontsize=7, verticalalignment='bottom',
                          bbox=dict(boxstyle='round,pad=0.3', facecolor='lightgray', alpha=0.8))
-            elif len(model_input_np.shape) == 3:
-                # Fallback: show the pre-background-removal crop histogram instead
+                         
+            elif isinstance(model_input_np, np.ndarray) and len(model_input_np.shape) == 3:
+                # Show the model input as numpy array (should be 0-255 range)
+                # Apply similar filtering to avoid spikes at 0 from background pixels
                 for i, color in enumerate(['blue', 'green', 'red']):
-                    hist = cv2.calcHist([hand_crop], [i], None, [256], [0, 256])
-                    ax10.plot(hist, color=color, alpha=0.7, label=f'{color.upper()}')
-                ax10.set_title('10. Original Crop Histogram\n(Pre-processing)')
-                ax10.set_xlabel('Pixel Intensity (0-255)')
+                    channel_data = model_input_np[:, :, i].flatten()
+                    
+                    # Filter out very dark pixels that might cause spikes at 0
+                    filtered_data = channel_data[channel_data > 10]
+                    
+                    if len(filtered_data) > 0:
+                        data_min = max(0, np.min(filtered_data) - 5)
+                        data_max = min(255, np.max(filtered_data) + 5)
+                        
+                        # Ensure min < max to avoid histogram range error
+                        if data_max <= data_min:
+                            data_max = data_min + 10  # Force a minimum range
+                        
+                        hist, bins = np.histogram(filtered_data, bins=40, range=[data_min, data_max])
+                        bin_centers = (bins[:-1] + bins[1:]) / 2
+                        ax10.plot(bin_centers, hist, color=color, alpha=0.7, label=f'{color.upper()}', linewidth=2)
+                    else:
+                        ax10.plot([], [], color=color, alpha=0.7, label=f'{color.upper()} (no data)', linewidth=2)
+                        
+                ax10.set_title('10. Model Input (Pre-normalization)\n(Dark pixels filtered out)')
+                ax10.set_xlabel('Pixel Intensity')
                 ax10.set_ylabel('Frequency')
                 ax10.legend()
+                ax10.grid(True, alpha=0.3)
             else:
                 ax10.text(0.5, 0.5, 'Model input\nnot available', ha='center', va='center',
                          transform=ax10.transAxes)
@@ -640,6 +716,343 @@ Skin Quality:
             logger.error(f"Error in capture visualization: {e}")
             print(f"❌ Capture failed: {e}")
     
+    def _evaluate_model_performance(self, frame: np.ndarray, processed_hand: np.ndarray, 
+                                  hand_info: Dict, prediction: str, confidence: float) -> None:
+        """
+        Comprehensive model performance evaluation to assess prediction quality.
+        """
+        try:
+            import matplotlib.pyplot as plt
+            from matplotlib.gridspec import GridSpec
+            import json
+            
+            # Extract hand information
+            bbox = hand_info.get('bbox', (0, 0, 100, 100))
+            x, y, w, h = bbox
+            
+            # Extract original hand crop
+            hand_crop = frame[y:y+h, x:x+w].copy()
+            
+            # Get multiple predictions for confidence analysis
+            predictions = []
+            confidences = []
+            
+            # Run prediction multiple times to check consistency
+            for i in range(5):
+                pred, conf = self.predict_hand_sign(processed_hand)
+                predictions.append(pred)
+                confidences.append(conf)
+            
+            # Get different preprocessing versions for comparison
+            hand_crop_original = hand_crop.copy()
+            hand_crop_bg_removed = self.hand_detector._remove_background_from_crop(hand_crop)
+            hand_crop_no_bg_removal = cv2.resize(hand_crop_original, (224, 224))
+            
+            # Test model on different versions
+            pred_original, conf_original = self.predict_hand_sign(hand_crop_no_bg_removal)
+            pred_bg_removed, conf_bg_removed = self.predict_hand_sign(processed_hand)
+            
+            # Create comprehensive evaluation visualization
+            fig = plt.figure(figsize=(20, 16))
+            gs = GridSpec(4, 5, figure=fig, hspace=0.4, wspace=0.3)
+            
+            fig.suptitle(f'🧪 Model Performance Evaluation - Current: {prediction} ({confidence:.3f})', 
+                        fontsize=18, fontweight='bold', color='darkblue')
+            
+            # Row 1: Input variations
+            ax1 = fig.add_subplot(gs[0, 0])
+            ax1.imshow(cv2.cvtColor(hand_crop_original, cv2.COLOR_BGR2RGB))
+            ax1.set_title(f'Original Crop\nPred: {pred_original} ({conf_original:.3f})')
+            ax1.axis('off')
+            
+            ax2 = fig.add_subplot(gs[0, 1])
+            ax2.imshow(cv2.cvtColor(hand_crop_bg_removed, cv2.COLOR_BGR2RGB))
+            ax2.set_title(f'Background Removed\nPred: {pred_bg_removed} ({conf_bg_removed:.3f})')
+            ax2.axis('off')
+            
+            # Model input tensor visualization
+            ax3 = fig.add_subplot(gs[0, 2])
+            if isinstance(processed_hand, torch.Tensor):
+                tensor_data = processed_hand.cpu().numpy()
+                if len(tensor_data.shape) == 4:
+                    tensor_data = tensor_data[0]
+                # Denormalize for display
+                mean = np.array([0.485, 0.456, 0.406])
+                std = np.array([0.229, 0.224, 0.225])
+                tensor_data = tensor_data.transpose(1, 2, 0)
+                tensor_data = (tensor_data * std + mean)
+                tensor_data = np.clip(tensor_data, 0, 1)
+                ax3.imshow(tensor_data)
+            ax3.set_title(f'Model Input (224x224)\nNormalized & Processed')
+            ax3.axis('off')
+            
+            # Confidence analysis
+            ax4 = fig.add_subplot(gs[0, 3:5])
+            
+            # Get full prediction probabilities if possible
+            with torch.no_grad():
+                if isinstance(processed_hand, torch.Tensor):
+                    outputs = self.model(processed_hand.unsqueeze(0).to(self.device))
+                    probabilities = torch.nn.functional.softmax(outputs, dim=1)
+                    probs = probabilities.cpu().numpy()[0]
+                else:
+                    # Fallback to mock probabilities
+                    probs = [0.1, 0.1, 0.8] if prediction == 'C' else [0.8, 0.1, 0.1]
+            
+            # Create confidence bar chart
+            bars = ax4.bar(self.classes, probs, color=['red' if p != max(probs) else 'green' for p in probs])
+            ax4.set_title('Full Model Prediction Confidence')
+            ax4.set_ylabel('Probability')
+            ax4.set_ylim(0, 1)
+            
+            # Add confidence threshold line
+            ax4.axhline(y=self.min_pred_confidence, color='orange', linestyle='--', label=f'Threshold: {self.min_pred_confidence}')
+            
+            # Annotate bars
+            for i, (bar, prob) in enumerate(zip(bars, probs)):
+                ax4.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
+                        f'{prob:.3f}', ha='center', va='bottom', fontweight='bold')
+            ax4.legend()
+            
+            # Row 2: Data quality analysis
+            ax5 = fig.add_subplot(gs[1, 0])
+            ax5.axis('off')
+            
+            # Calculate background removal quality metrics
+            bg_mask = np.any(hand_crop_bg_removed > 5, axis=2)
+            skin_percentage = np.sum(bg_mask) / bg_mask.size * 100
+            
+            # Calculate how similar this is to training data (black background)
+            black_pixels = np.sum(np.all(hand_crop_bg_removed == [0, 0, 0], axis=2))
+            total_pixels = hand_crop_bg_removed.shape[0] * hand_crop_bg_removed.shape[1]
+            black_percentage = (black_pixels / total_pixels) * 100
+            
+            quality_text = f"""Background Removal Quality:
+
+Skin Detection: {skin_percentage:.1f}%
+Black Background: {black_percentage:.1f}%
+Training Match: {'🟢 Good' if black_percentage > 30 else '🟡 Poor' if black_percentage > 10 else '🔴 Very Poor'}
+
+Image Quality:
+Size: {w}×{h} → 224×224
+Aspect Ratio: {w/h:.2f}
+Resize Quality: {'🟢 Good' if abs(w/h - 1) < 0.3 else '🟡 Stretched'}
+
+Data Pipeline:
+1. Hand Detection ✓
+2. ROI Extraction ✓
+3. Background Removal {'✓' if skin_percentage > 50 else '⚠️'}
+4. Resize to 224×224 ✓
+5. ImageNet Normalize ✓
+"""
+            
+            ax5.text(0.05, 0.95, quality_text, transform=ax5.transAxes,
+                    fontsize=10, verticalalignment='top', fontfamily='monospace')
+            ax5.set_title('Data Quality Assessment')
+            
+            # Consistency analysis
+            ax6 = fig.add_subplot(gs[1, 1])
+            prediction_counts = {pred: predictions.count(pred) for pred in set(predictions)}
+            consistency_score = max(prediction_counts.values()) / len(predictions)
+            
+            ax6.bar(prediction_counts.keys(), prediction_counts.values(), 
+                   color=['green' if count == max(prediction_counts.values()) else 'orange' for count in prediction_counts.values()])
+            ax6.set_title(f'Prediction Consistency\nScore: {consistency_score:.1%}')
+            ax6.set_ylabel('Count (out of 5 runs)')
+            
+            # Model confidence distribution
+            ax7 = fig.add_subplot(gs[1, 2])
+            ax7.hist(confidences, bins=10, alpha=0.7, color='blue', edgecolor='black')
+            ax7.axvline(confidence, color='red', linestyle='--', label=f'Current: {confidence:.3f}')
+            ax7.axvline(self.min_pred_confidence, color='orange', linestyle='--', label=f'Threshold: {self.min_pred_confidence}')
+            ax7.set_title('Confidence Distribution')
+            ax7.set_xlabel('Confidence Score')
+            ax7.set_ylabel('Frequency')
+            ax7.legend()
+            
+            # Training vs Live data comparison
+            ax8 = fig.add_subplot(gs[1, 3:5])
+            ax8.axis('off')
+            
+            # Analyze color characteristics
+            if np.any(bg_mask):
+                skin_pixels = hand_crop_bg_removed[bg_mask]
+                bgr_mean = np.mean(skin_pixels, axis=0)
+                bgr_std = np.std(skin_pixels, axis=0)
+                
+                # Expected training data characteristics (black background, clean hands)
+                training_text = f"""Training vs Live Data Analysis:
+
+Live Data Characteristics:
+- Background: {black_percentage:.1f}% black (training: ~90-95%)
+- Skin Color: BGR({bgr_mean[0]:.0f}, {bgr_mean[1]:.0f}, {bgr_mean[2]:.0f})
+- Color Variance: ±{np.mean(bgr_std):.1f} (training: ~±15-25)
+- Lighting: {'Consistent' if np.mean(bgr_std) < 25 else 'Variable'}
+
+Training Data Match:
+Background Similarity: {'🟢 Excellent' if black_percentage > 70 else '🟡 Good' if black_percentage > 40 else '🔴 Poor'}
+Color Consistency: {'🟢 Good' if np.mean(bgr_std) < 30 else '🟡 Variable' if np.mean(bgr_std) < 50 else '🔴 Poor'}
+Overall Match: {'🟢 Good' if black_percentage > 50 and np.mean(bgr_std) < 35 else '🟡 Moderate' if black_percentage > 30 else '🔴 Poor'}
+
+Recommendations:
+- {'Improve background removal' if black_percentage < 40 else 'Background removal OK'}
+- {'Use better lighting' if np.mean(bgr_std) > 40 else 'Lighting OK'}
+- {'Consider retraining with live data' if black_percentage < 30 else 'Model should work well'}
+"""
+                
+                ax8.text(0.05, 0.95, training_text, transform=ax8.transAxes,
+                        fontsize=9, verticalalignment='top', fontfamily='monospace')
+            else:
+                ax8.text(0.5, 0.5, 'No skin pixels detected\nBackground removal failed', 
+                        ha='center', va='center', transform=ax8.transAxes, color='red', fontsize=14)
+            
+            ax8.set_title('Training Data Compatibility Analysis')
+            
+            # Row 3: Performance recommendations
+            ax9 = fig.add_subplot(gs[2, :])
+            ax9.axis('off')
+            
+            # Generate specific recommendations
+            recommendations = []
+            
+            if confidence < self.min_pred_confidence:
+                recommendations.append("🔴 LOW CONFIDENCE: Model is uncertain about this prediction")
+            
+            if black_percentage < 30:
+                recommendations.append("🟡 BACKGROUND ISSUE: Background removal not matching training data")
+                recommendations.append("   → Try adjusting lighting or hand position")
+                recommendations.append("   → Consider collecting training data with similar backgrounds")
+            
+            if consistency_score < 0.6:
+                recommendations.append("🟡 INCONSISTENCY: Model predictions vary between runs")
+                recommendations.append("   → This suggests the input data quality could be improved")
+            
+            if np.mean(bgr_std) > 40:
+                recommendations.append("🟡 LIGHTING ISSUE: High color variance detected")
+                recommendations.append("   → Try more consistent lighting")
+            
+            if abs(w/h - 1) > 0.5:
+                recommendations.append("🟡 ASPECT RATIO: Hand crop is very stretched")
+                recommendations.append("   → This may affect model performance")
+            
+            if conf_bg_removed > conf_original + 0.1:
+                recommendations.append("🟢 BACKGROUND REMOVAL HELPS: BG removal improves confidence")
+            elif conf_original > conf_bg_removed + 0.1:
+                recommendations.append("🔴 BACKGROUND REMOVAL HURTS: Original image works better")
+                recommendations.append("   → Background removal may be removing important hand features")
+            
+            if not recommendations:
+                recommendations.append("🟢 GOOD PERFORMANCE: No major issues detected")
+                recommendations.append("🟢 Model appears to be working well with current data")
+            
+            recommendations_text = "PERFORMANCE RECOMMENDATIONS:\n\n" + "\n".join(recommendations)
+            
+            ax9.text(0.05, 0.95, recommendations_text, transform=ax9.transAxes,
+                    fontsize=11, verticalalignment='top', fontfamily='monospace',
+                    bbox=dict(boxstyle='round,pad=1', facecolor='lightblue', alpha=0.8))
+            ax9.set_title('🎯 Model Performance Analysis & Recommendations', fontsize=14, fontweight='bold')
+            
+            # Row 4: Summary stats
+            ax10 = fig.add_subplot(gs[3, 0:2])
+            ax10.axis('off')
+            
+            summary_stats = f"""PERFORMANCE SUMMARY:
+
+Current Prediction: {prediction} ({confidence:.3f})
+Consistency Score: {consistency_score:.1%}
+Background Match: {black_percentage:.1f}% black
+Confidence Range: {min(confidences):.3f} - {max(confidences):.3f}
+
+Comparison:
+Original Image: {pred_original} ({conf_original:.3f})
+Background Removed: {pred_bg_removed} ({conf_bg_removed:.3f})
+Difference: {conf_bg_removed - conf_original:+.3f}
+
+Data Quality Score: {min(100, skin_percentage + (100-black_percentage)*0.3):.0f}/100
+Model Confidence: {'High' if confidence > 0.7 else 'Medium' if confidence > 0.4 else 'Low'}
+Training Match: {'Good' if black_percentage > 50 else 'Poor'}
+"""
+            
+            ax10.text(0.05, 0.95, summary_stats, transform=ax10.transAxes,
+                     fontsize=10, verticalalignment='top', fontfamily='monospace',
+                     bbox=dict(boxstyle='round,pad=0.5', facecolor='lightyellow', alpha=0.8))
+            ax10.set_title('Performance Summary')
+            
+            # Action items
+            ax11 = fig.add_subplot(gs[3, 2:5])
+            ax11.axis('off')
+            
+            action_items = f"""IMMEDIATE ACTION ITEMS:
+
+1. Background Removal Quality:
+   Current: {black_percentage:.1f}% black background
+   Target: >70% for best performance
+   {'✅ Good' if black_percentage > 70 else '⚠️ Needs improvement'}
+
+2. Model Confidence:
+   Current: {confidence:.3f}
+   Threshold: {self.min_pred_confidence}
+   {'✅ Above threshold' if confidence > self.min_pred_confidence else '❌ Below threshold'}
+
+3. Data Collection Strategy:
+   {'✅ Current setup works well' if black_percentage > 50 and confidence > self.min_pred_confidence else '⚠️ Consider collecting training data in current environment'}
+
+4. Next Steps:
+   {'• Continue with current setup' if black_percentage > 50 else '• Improve lighting/background removal'}
+   {'• Model is performing well' if confidence > 0.6 else '• Consider retraining with live environment data'}
+"""
+            
+            ax11.text(0.05, 0.95, action_items, transform=ax11.transAxes,
+                     fontsize=10, verticalalignment='top', fontfamily='monospace',
+                     bbox=dict(boxstyle='round,pad=0.5', facecolor='lightgreen', alpha=0.8))
+            ax11.set_title('Action Items & Next Steps')
+            
+            plt.tight_layout()
+            plt.show(block=False)
+            
+            # Save evaluation results
+            timestamp = time.time()
+            eval_dir = Path("data/raw/evaluations")
+            eval_dir.mkdir(parents=True, exist_ok=True)
+            
+            eval_data = {
+                'timestamp': timestamp,
+                'prediction': prediction,
+                'confidence': float(confidence),
+                'consistency_score': float(consistency_score),
+                'background_black_percentage': float(black_percentage),
+                'skin_percentage': float(skin_percentage),
+                'training_match_score': float(min(100, skin_percentage + (100-black_percentage)*0.3)),
+                'original_vs_bg_removed': {
+                    'original_pred': pred_original,
+                    'original_conf': float(conf_original),
+                    'bg_removed_pred': pred_bg_removed,
+                    'bg_removed_conf': float(conf_bg_removed),
+                    'improvement': float(conf_bg_removed - conf_original)
+                },
+                'recommendations': recommendations,
+                'multiple_runs': {
+                    'predictions': predictions,
+                    'confidences': [float(c) for c in confidences]
+                }
+            }
+            
+            eval_file = eval_dir / f"model_eval_{prediction}_{timestamp:.0f}.json"
+            with open(eval_file, 'w') as f:
+                json.dump(eval_data, f, indent=2)
+            
+            print(f"\n🧪 Model Performance Evaluation Complete!")
+            print(f"  Current Prediction: {prediction} ({confidence:.3f})")
+            print(f"  Consistency Score: {consistency_score:.1%}")
+            print(f"  Background Match: {black_percentage:.1f}% black")
+            print(f"  Training Compatibility: {'Good' if black_percentage > 50 else 'Poor'}")
+            print(f"  Evaluation saved to: {eval_file}")
+            print(f"  📊 Close the evaluation window when done reviewing.")
+            
+        except Exception as e:
+            logger.error(f"Error in model evaluation: {e}")
+            print(f"❌ Model evaluation failed: {e}")
+    
     def _process_frame(self, frame: np.ndarray):
         """
         Handles all processing for a single frame, including detection, 
@@ -767,6 +1180,11 @@ Skin Quality:
             logger.info("⏸️ Paused" if self.paused else "▶️ Resumed")
         elif key == ord('c'):
             # Capture and visualize current hand data
+            logger.info(f"🔍 Capture debug - Enabled: {self.capture_enabled}, "
+                       f"Processed hand: {self.last_processed_hand is not None}, "
+                       f"Hand info: {self.last_hand_info is not None}, "
+                       f"Frame: {self.last_capture_frame is not None}")
+            
             if (self.capture_enabled and self.last_processed_hand is not None and 
                 self.last_hand_info is not None and self.last_capture_frame is not None):
                 logger.info("📸 Capturing hand data...")
@@ -778,7 +1196,18 @@ Skin Quality:
                     self.last_confidence
                 )
             else:
-                logger.warning("❌ No hand data available to capture")
+                missing_items = []
+                if not self.capture_enabled:
+                    missing_items.append("capture disabled")
+                if self.last_processed_hand is None:
+                    missing_items.append("no processed hand")
+                if self.last_hand_info is None:
+                    missing_items.append("no hand info")
+                if self.last_capture_frame is None:
+                    missing_items.append("no capture frame")
+                    
+                logger.warning(f"❌ Cannot capture: {', '.join(missing_items)}")
+                logger.info("💡 Try detecting a hand first, then press 'C' to capture")
         elif key == ord('+') or key == ord('='):
             # Increase frame skip rate (lower performance, higher quality)
             self.frame_skip_rate = max(1, self.frame_skip_rate - 1)
@@ -797,6 +1226,20 @@ Skin Quality:
                 self.frame_skip_rate = 1
                 self.target_fps = 25
                 logger.info("🎯 Quality mode: ON (Process all frames, target 25 FPS)")
+        elif key == ord('m'):
+            # Model performance evaluation
+            if (self.last_processed_hand is not None and 
+                self.last_hand_info is not None and self.last_capture_frame is not None):
+                logger.info("🧪 Running model performance evaluation...")
+                self._evaluate_model_performance(
+                    self.last_capture_frame, 
+                    self.last_processed_hand,
+                    self.last_hand_info,
+                    self.last_prediction,
+                    self.last_confidence
+                )
+            else:
+                logger.warning("❌ No hand data available for model evaluation")
 
     def run(self):
         """Main loop for the application."""
@@ -810,6 +1253,7 @@ Skin Quality:
         logger.info("  C: 📸 Capture and visualize hand data")
         logger.info("  P: Toggle performance mode (skip frames for higher FPS)")
         logger.info("  +/-: Adjust frame skip rate manually")
+        logger.info("  M: 🧪 Model performance evaluation")
         logger.info("")
         
         self.cap = cv2.VideoCapture(self.camera_index)

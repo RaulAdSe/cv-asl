@@ -119,6 +119,7 @@ class ASLHandDetector:
             # Convert to multiple color spaces for better skin detection
             hsv = cv2.cvtColor(hand_crop, cv2.COLOR_BGR2HSV)
             ycrcb = cv2.cvtColor(hand_crop, cv2.COLOR_BGR2YCrCb)
+            lab = cv2.cvtColor(hand_crop, cv2.COLOR_BGR2LAB)
             b, g, r = cv2.split(hand_crop)
             
             # Method 1: BGR ratio-based detection (fast)
@@ -136,24 +137,49 @@ class ASLHandDetector:
             # Fine-tuned YCrCb ranges for better skin detection
             ycrcb_mask = ((cr >= 135) & (cr <= 180) & (cb >= 85) & (cb <= 135)).astype(np.uint8)
             
-            # Combine all three methods for robust detection
-            combined_mask = ((bgr_mask | hsv_mask | ycrcb_mask)).astype(np.uint8) * 255
+            # Method 4: LAB color space (good for consistent lighting)
+            l_lab, a_lab, b_lab = cv2.split(lab)
+            lab_mask = ((l_lab >= 50) & (l_lab <= 200) & (a_lab >= 120) & (a_lab <= 150) & (b_lab >= 130) & (b_lab <= 160)).astype(np.uint8)
+            
+            # Combine all four methods for robust detection
+            combined_mask = ((bgr_mask | hsv_mask | ycrcb_mask | lab_mask)).astype(np.uint8) * 255
+            
+            # NEW: Apply adaptive threshold to handle lighting variations
+            # Convert to grayscale for edge detection
+            gray = cv2.cvtColor(hand_crop, cv2.COLOR_BGR2GRAY)
+            
+            # Use adaptive threshold to find strong edges (likely hand boundaries)
+            adaptive_thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+            
+            # Invert so hand regions are white
+            adaptive_thresh = cv2.bitwise_not(adaptive_thresh)
+            
+            # Combine with skin detection (AND operation to be more conservative)
+            combined_mask = cv2.bitwise_and(combined_mask, adaptive_thresh)
             
             # Enhanced morphological operations for cleaner result
             # First: close small gaps in skin regions
-            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))  # Larger kernel
             combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel_close)
             
             # Second: remove small noise and non-skin artifacts
-            kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))  # Larger kernel
             combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel_open)
             
-            # Third: dilate to ensure we capture hand edges properly
-            kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-            combined_mask = cv2.dilate(combined_mask, kernel_dilate, iterations=2)
+            # Third: find largest connected component (assume it's the hand)
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(combined_mask, connectivity=8)
             
-            # Fourth: smooth edges with Gaussian blur
-            combined_mask = cv2.GaussianBlur(combined_mask, (5, 5), 1)
+            if num_labels > 1:  # If we found components
+                # Get the largest component (excluding background)
+                largest_component = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+                combined_mask = (labels == largest_component).astype(np.uint8) * 255
+            
+            # Fourth: dilate to ensure we capture hand edges properly
+            kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            combined_mask = cv2.dilate(combined_mask, kernel_dilate, iterations=3)
+            
+            # Fifth: smooth edges with Gaussian blur
+            combined_mask = cv2.GaussianBlur(combined_mask, (7, 7), 2)
             
             # Apply mask with black background
             result[combined_mask == 0] = [0, 0, 0]
