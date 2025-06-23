@@ -82,8 +82,11 @@ class ASLHandDetector:
         hand_crop = frame[crop_y1:crop_y2, crop_x1:crop_x2]
         if hand_crop.size == 0: return None
         
-        # Apply background removal to the hand crop
-        hand_crop_bg_removed = self._remove_background_from_crop(hand_crop)
+        # Calculate the crop bbox relative to the full frame for MOG2-ROI processing
+        crop_bbox = (crop_x1, crop_y1, crop_x2 - crop_x1, crop_y2 - crop_y1)
+        
+        # Apply enhanced background removal using MOG2 + skin detection
+        hand_crop_bg_removed = self._remove_background_from_crop(hand_crop, crop_bbox, frame)
         
         # Resize to square
         resized = cv2.resize(hand_crop_bg_removed, (target_size, target_size), interpolation=cv2.INTER_AREA)
@@ -100,12 +103,24 @@ class ASLHandDetector:
         skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_CLOSE, kernel)
         return skin_mask
     
-    def _remove_background_from_crop(self, hand_crop: np.ndarray) -> np.ndarray:
+    def _remove_background_from_crop(self, hand_crop: np.ndarray, original_bbox: Optional[Tuple[int, int, int, int]] = None, full_frame: Optional[np.ndarray] = None) -> np.ndarray:
         """
-        Fast background removal from hand crop, optimized for real-time performance.
-        Uses efficient skin detection instead of slow GrabCut.
+        Enhanced background removal using MOG2-ROI approach when possible, with fallback to skin detection.
+        
+        Args:
+            hand_crop: The cropped hand region
+            original_bbox: Original bounding box coordinates (x, y, w, h) in full frame
+            full_frame: The full frame to extract ROI from
+            
+        Returns:
+            Hand crop with background removed
         """
-        return self._fast_skin_based_removal(hand_crop)
+        # If we have the full frame and bbox, use enhanced MOG2-ROI approach
+        if original_bbox is not None and full_frame is not None and self.bg_remover.bg_model_learned:
+            return self._mog2_roi_background_removal(hand_crop, original_bbox, full_frame)
+        else:
+            # Fallback to skin-based removal (for backward compatibility or when MOG2 not ready)
+            return self._fast_skin_based_removal(hand_crop)
     
     def _fast_skin_based_removal(self, hand_crop: np.ndarray) -> np.ndarray:
         """
@@ -298,8 +313,21 @@ class ASLHandDetector:
         # --- Prepare Output ---
         processed_hand, hand_info = None, None
         if hand_bbox is not None:
-            # Only create info dict if we have a box to draw.
-            hand_info = {"bbox": hand_bbox, "status": status}
+            # Calculate crop bbox for background removal visualization
+            x, y, w, h = hand_bbox
+            center_x, center_y, max_dim = x + w // 2, y + h // 2, max(w, h)
+            crop_x1 = max(0, center_x - max_dim // 2)
+            crop_y1 = max(0, center_y - max_dim // 2)
+            crop_x2 = min(frame.shape[1], center_x + max_dim // 2)
+            crop_y2 = min(frame.shape[0], center_y + max_dim // 2)
+            crop_bbox = (crop_x1, crop_y1, crop_x2 - crop_x1, crop_y2 - crop_y1)
+            
+            # Create enhanced info dict with crop bbox information
+            hand_info = {
+                "bbox": hand_bbox, 
+                "status": status,
+                "crop_bbox": crop_bbox  # Add crop bbox for MOG2-ROI visualization
+            }
             processed_hand = self._preprocess_hand(frame, hand_bbox, target_size)
             
         return processed_hand, hand_info
@@ -308,4 +336,126 @@ class ASLHandDetector:
         """Resets the state of the detector and its components."""
         self.bg_remover.reset()
         self.tracker.reset()
-        logger.info("ASL Hand Detector state has been reset.") 
+        logger.info("ASL Hand Detector state has been reset.")
+
+    def _mog2_roi_background_removal(self, hand_crop: np.ndarray, original_bbox: Tuple[int, int, int, int], full_frame: np.ndarray) -> np.ndarray:
+        """
+        Enhanced background removal using MOG2 background subtraction within the ROI.
+        
+        This method leverages the learned global background model to create a more accurate
+        foreground mask within the hand region, then combines it with skin detection.
+        
+        Args:
+            hand_crop: The cropped hand region
+            original_bbox: Original bounding box coordinates (x, y, w, h) in full frame
+            full_frame: The full frame to extract ROI from
+            
+        Returns:
+            Hand crop with background removed using MOG2 + skin detection
+        """
+        result = hand_crop.copy()
+        
+        try:
+            # Check if background model is learned
+            if not self.bg_remover.bg_model_learned:
+                # Fallback to skin-based removal if MOG2 not ready
+                return self._fast_skin_based_removal(hand_crop)
+            
+            # Extract ROI from full frame for MOG2 processing
+            x, y, w, h = original_bbox
+            roi_frame = full_frame[y:y+h, x:x+w].copy()
+            
+            # Resize ROI to match hand_crop if they differ (due to preprocessing)
+            if roi_frame.shape[:2] != hand_crop.shape[:2]:
+                roi_frame = cv2.resize(roi_frame, (hand_crop.shape[1], hand_crop.shape[0]))
+            
+            # Apply MOG2 to the ROI to get foreground mask
+            # Using learningRate=0 to use learned background without updating it
+            roi_fg_mask = self.bg_remover.bg_subtractor.apply(roi_frame, learningRate=0)
+            
+            # Clean up MOG2 mask with morphological operations
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            roi_fg_mask = cv2.morphologyEx(roi_fg_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+            roi_fg_mask = cv2.morphologyEx(roi_fg_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+            
+            # Get skin detection mask
+            skin_mask = self.get_skin_mask_for_crop(hand_crop)
+            
+            # Combine MOG2 foreground with skin detection
+            # Strategy: Use intersection (AND) for high precision, then add skin-only regions
+            
+            # High confidence: pixels that are both moving (MOG2) AND skin-colored
+            high_confidence_mask = cv2.bitwise_and(roi_fg_mask, skin_mask)
+            
+            # Medium confidence: skin pixels near MOG2 foreground (dilate MOG2 mask)
+            dilated_mog2 = cv2.dilate(roi_fg_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)), iterations=2)
+            skin_near_motion = cv2.bitwise_and(skin_mask, dilated_mog2)
+            
+            # Combine high and medium confidence regions
+            combined_mask = cv2.bitwise_or(high_confidence_mask, skin_near_motion)
+            
+            # Final cleanup: select largest connected component (main hand region)
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(combined_mask, connectivity=8)
+            
+            if num_labels > 1:  # If we found components
+                # Get the largest component (excluding background)
+                largest_component = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+                combined_mask = (labels == largest_component).astype(np.uint8) * 255
+            
+            # Apply final morphological operations for smooth edges
+            kernel_final = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel_final, iterations=1)
+            combined_mask = cv2.dilate(combined_mask, kernel_final, iterations=1)
+            
+            # Smooth the mask edges
+            combined_mask = cv2.GaussianBlur(combined_mask, (5, 5), 1)
+            
+            # Apply the mask: set non-hand pixels to black
+            result[combined_mask == 0] = [0, 0, 0]
+            
+            logger.debug(f"MOG2-ROI background removal applied. Foreground pixels: {np.sum(combined_mask > 0)}")
+            
+        except Exception as e:
+            logger.warning(f"MOG2-ROI background removal failed, using skin fallback: {e}")
+            # Fallback to skin-based removal
+            result = self._fast_skin_based_removal(hand_crop)
+        
+        return result 
+
+    def get_mog2_mask_for_crop(self, hand_crop: np.ndarray, original_bbox: Tuple[int, int, int, int], full_frame: np.ndarray) -> np.ndarray:
+        """
+        Get the MOG2 foreground mask for visualization purposes.
+        
+        Args:
+            hand_crop: Hand crop image in BGR format
+            original_bbox: Original bounding box coordinates (x, y, w, h) in full frame
+            full_frame: The full frame to extract ROI from
+            
+        Returns:
+            Binary MOG2 foreground mask (0-255) or zeros if MOG2 not ready
+        """
+        try:
+            # Check if background model is learned
+            if not self.bg_remover.bg_model_learned:
+                return np.zeros(hand_crop.shape[:2], dtype=np.uint8)
+            
+            # Extract ROI from full frame for MOG2 processing
+            x, y, w, h = original_bbox
+            roi_frame = full_frame[y:y+h, x:x+w].copy()
+            
+            # Resize ROI to match hand_crop if they differ
+            if roi_frame.shape[:2] != hand_crop.shape[:2]:
+                roi_frame = cv2.resize(roi_frame, (hand_crop.shape[1], hand_crop.shape[0]))
+            
+            # Apply MOG2 to get foreground mask
+            roi_fg_mask = self.bg_remover.bg_subtractor.apply(roi_frame, learningRate=0)
+            
+            # Clean up the mask
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            roi_fg_mask = cv2.morphologyEx(roi_fg_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+            roi_fg_mask = cv2.morphologyEx(roi_fg_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+            
+            return roi_fg_mask
+        except Exception as e:
+            logger.warning(f"Failed to generate MOG2 mask: {e}")
+            return np.zeros(hand_crop.shape[:2], dtype=np.uint8) 

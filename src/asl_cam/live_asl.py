@@ -193,12 +193,25 @@ class LiveASLRecognizer:
             # Get the background-removed version and skin mask for visualization
             hand_crop_bg_removed = None
             skin_mask_crop = None
+            mog2_mask_crop = None
+            crop_bbox = hand_info.get('crop_bbox')
+            
             if hasattr(self.hand_detector, '_remove_background_from_crop'):
                 try:
-                    hand_crop_bg_removed = self.hand_detector._remove_background_from_crop(hand_crop)
+                    # Use the new MOG2-ROI approach if crop_bbox is available
+                    if crop_bbox is not None:
+                        hand_crop_bg_removed = self.hand_detector._remove_background_from_crop(hand_crop, crop_bbox, frame)
+                        mog2_mask_crop = self.hand_detector.get_mog2_mask_for_crop(hand_crop, crop_bbox, frame)
+                    else:
+                        # Fallback to skin-only approach
+                        hand_crop_bg_removed = self.hand_detector._remove_background_from_crop(hand_crop)
+                    
                     skin_mask_crop = self.hand_detector.get_skin_mask_for_crop(hand_crop)
                 except Exception as e:
                     logger.warning(f"Failed to get background-removed crop for visualization: {e}")
+            
+            # Update info text to show background removal method
+            bg_removal_method = "MOG2+Skin" if crop_bbox is not None and self.hand_detector.bg_remover.bg_model_learned else "Skin-only"
             
             # Get model input tensor (224x224 normalized)
             model_input = processed_hand
@@ -233,7 +246,7 @@ class LiveASLRecognizer:
             ax2 = fig.add_subplot(gs[0, 1])
             if hand_crop_bg_removed is not None:
                 ax2.imshow(cv2.cvtColor(hand_crop_bg_removed, cv2.COLOR_BGR2RGB))
-                ax2.set_title(f'2. Background Removed\n{hand_crop_bg_removed.shape[1]}×{hand_crop_bg_removed.shape[0]} pixels')
+                ax2.set_title(f'2. Background Removed ({bg_removal_method})\n{hand_crop_bg_removed.shape[1]}×{hand_crop_bg_removed.shape[0]} pixels')
             else:
                 ax2.text(0.5, 0.5, 'Background removal\nfailed', ha='center', va='center',
                         transform=ax2.transAxes, fontsize=12)
@@ -303,6 +316,9 @@ Threshold: {self.min_pred_confidence:.2f}
 Detection:
 Tracker: {'Active' if hand_info.get('tracking', False) else 'Inactive'}
 Frame: {hand_info.get('frame_count', 'N/A')}
+
+Background Removal:
+Method: {bg_removal_method}
 """
             
             ax5.text(0.05, 0.95, info_text, transform=ax5.transAxes, 
@@ -567,9 +583,13 @@ Status: {'✅ Learned' if bg_learned else '🔄 Learning'}
 Progress: {bg_progress:.1%}
 
 MOG2 Parameters:
-- History: 500 frames
-- Threshold: 16.0
-- Shadow Detection: ON
+- History: 300 frames
+- Threshold: 25.0
+- Learning Rate: {'0 (Locked)' if bg_learned else 'Auto'}
+
+Background Removal:
+- Method: {bg_removal_method}
+- ROI-based: {'✅' if crop_bbox is not None else '❌'}
 
 Hand Tracking:
 - Kalman Filter: Active
@@ -579,6 +599,36 @@ Hand Tracking:
             ax12.text(0.05, 0.95, vision_text, transform=ax12.transAxes,
                      fontsize=8, verticalalignment='top', fontfamily='monospace')
             ax12.set_title('12. Vision System')
+            
+            # Panel 12.5: MOG2 ROI Mask (if available)
+            if mog2_mask_crop is not None and bg_learned:
+                # Use a subplot in the bottom area
+                ax12_5 = fig.add_subplot(gs[3, 2])
+                ax12_5.imshow(mog2_mask_crop, cmap='Blues')
+                ax12_5.set_title('12.5 MOG2 ROI Mask')
+                
+                # Add MOG2 mask statistics
+                mog2_percentage = np.sum(mog2_mask_crop > 0) / mog2_mask_crop.size * 100
+                mog2_mean = np.mean(mog2_mask_crop[mog2_mask_crop > 0]) if np.any(mog2_mask_crop > 0) else 0
+                
+                ax12_5.text(0.02, 0.98, f'Foreground: {mog2_percentage:.1f}%\nMean: {mog2_mean:.1f}',
+                           transform=ax12_5.transAxes, fontsize=8, verticalalignment='top',
+                           bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+                ax12_5.axis('off')
+            elif crop_bbox is not None and not bg_learned:
+                # Show learning status
+                ax12_5 = fig.add_subplot(gs[3, 2])
+                ax12_5.text(0.5, 0.5, f'MOG2 Learning...\n{bg_progress:.1%} complete', 
+                           ha='center', va='center', transform=ax12_5.transAxes, fontsize=10)
+                ax12_5.set_title('12.5 MOG2 ROI Mask\n(Learning)')
+                ax12_5.axis('off')
+            else:
+                # Show that MOG2-ROI is not available
+                ax12_5 = fig.add_subplot(gs[3, 2])
+                ax12_5.text(0.5, 0.5, 'MOG2-ROI\nnot available', 
+                           ha='center', va='center', transform=ax12_5.transAxes, fontsize=10)
+                ax12_5.set_title('12.5 MOG2 ROI Mask\n(N/A)')
+                ax12_5.axis('off')
             
             # Panel 13: System performance
             ax13 = fig.add_subplot(gs[3, 1])
@@ -668,6 +718,8 @@ Skin Quality:
                 cv2.imwrite(f"{capture_base}_bg_removed.jpg", hand_crop_bg_removed)
             if skin_mask_crop is not None:
                 cv2.imwrite(f"{capture_base}_skin_mask.jpg", skin_mask_crop)
+            if mog2_mask_crop is not None:
+                cv2.imwrite(f"{capture_base}_mog2_mask.jpg", mog2_mask_crop)
             cv2.imwrite(f"{capture_base}_model_input.jpg", model_input_np)
             cv2.imwrite(f"{capture_base}_full_frame.jpg", frame)
             
@@ -677,9 +729,17 @@ Skin Quality:
                 'prediction': prediction,
                 'confidence': float(confidence),
                 'bbox': list(bbox),
+                'crop_bbox': list(crop_bbox) if crop_bbox is not None else None,
                 'hand_size': [w, h],
                 'hand_area': total_pixels,
                 'aspect_ratio': float(aspect_ratio),
+                'background_removal': {
+                    'method': bg_removal_method,
+                    'mog2_available': mog2_mask_crop is not None,
+                    'mog2_background_learned': self.hand_detector.bg_remover.bg_model_learned,
+                    'mog2_progress': self.hand_detector.bg_remover.get_progress(),
+                    'roi_based': crop_bbox is not None
+                },
                 'model_info': {
                     'device': str(self.device),
                     'classes': self.classes,
@@ -692,10 +752,17 @@ Skin Quality:
                     'hand_crop_size': list(hand_crop.shape),
                     'model_input_size': list(model_input_np.shape)
                 },
+                'vision_system': {
+                    'mog2_history': 300,
+                    'mog2_threshold': 25.0,
+                    'learning_rate': 0 if self.hand_detector.bg_remover.bg_model_learned else -1,
+                    'background_learned': self.hand_detector.bg_remover.bg_model_learned
+                },
                 'files': {
                     'original_crop': f"{capture_base.name}_original.jpg",
                     'bg_removed_crop': f"{capture_base.name}_bg_removed.jpg" if hand_crop_bg_removed is not None else None,
                     'skin_mask': f"{capture_base.name}_skin_mask.jpg" if skin_mask_crop is not None else None,
+                    'mog2_mask': f"{capture_base.name}_mog2_mask.jpg" if mog2_mask_crop is not None else None,
                     'model_input': f"{capture_base.name}_model_input.jpg",
                     'full_frame': f"{capture_base.name}_full_frame.jpg"
                 }
