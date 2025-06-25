@@ -1011,23 +1011,64 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
             x, y, w, h = bbox
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
             cv2.putText(frame, status, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-
-        # Draw Prediction
-        pred_text = f"Prediction: {prediction} ({confidence:.2f})"
-        cv2.putText(frame, pred_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         
-        # Draw FPS and performance stats
+        # Add instruction text at the top
+        cv2.putText(frame, "Show ASL letter to camera", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
+        # Draw BIG centered prediction
+        h, w = frame.shape[:2]
+        
+        # Only show the letter, make it HUGE and centered
+        if prediction != "Show Hand" and confidence > self.min_pred_confidence:
+            letter_text = prediction
+            color = (0, 255, 0)  # Green for confident predictions
+        else:
+            letter_text = "?" if prediction == "Show Hand" else prediction
+            color = (0, 255, 255)  # Yellow for uncertain/no prediction
+        
+        # Calculate text size for perfect centering
+        font_scale = 15  # Much bigger font
+        thickness = 20
+        (text_width, text_height), baseline = cv2.getTextSize(letter_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+        
+        # Center the text
+        text_x = (w - text_width) // 2
+        text_y = (h + text_height) // 2
+        
+        # Add background rectangle for better visibility
+        padding = 50
+        cv2.rectangle(frame, 
+                     (text_x - padding, text_y - text_height - padding), 
+                     (text_x + text_width + padding, text_y + baseline + padding),
+                     (0, 0, 0), -1)  # Black background
+        
+        # Draw the big letter
+        cv2.putText(frame, letter_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
+        
+        # Small confidence text below the big letter
+        if prediction != "Show Hand":
+            conf_text = f"{confidence:.2f}"
+            small_font_scale = 2
+            small_thickness = 3
+            (conf_width, conf_height), _ = cv2.getTextSize(conf_text, cv2.FONT_HERSHEY_SIMPLEX, small_font_scale, small_thickness)
+            conf_x = (w - conf_width) // 2
+            conf_y = text_y + text_height + 80
+            cv2.putText(frame, conf_text, (conf_x, conf_y), cv2.FONT_HERSHEY_SIMPLEX, small_font_scale, (255, 255, 255), small_thickness)
+        
+        # Draw FPS and performance stats (moved to bottom-left to avoid interfering with big prediction)
         if self.show_stats:
             fps = self.fps_tracker.get_fps()
-            cv2.putText(frame, f"FPS: {fps:.1f}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            stats_y_start = h - 120  # Start from bottom
+            
+            cv2.putText(frame, f"FPS: {fps:.1f}", (10, stats_y_start), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             
             # Show frame skip rate for performance monitoring
-            cv2.putText(frame, f"Skip Rate: 1/{self.frame_skip_rate}", (10, 110), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            cv2.putText(frame, f"Skip Rate: 1/{self.frame_skip_rate}", (10, stats_y_start + 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
             
             # Show target FPS
-            cv2.putText(frame, f"Target: {self.target_fps} FPS", (10, 140), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            cv2.putText(frame, f"Target: {self.target_fps} FPS", (10, stats_y_start + 60), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
             
         # --- PAUSED indicator ---
         if self.paused:
