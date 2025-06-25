@@ -1031,9 +1031,9 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
         thickness = 8   # Proportionally smaller thickness
         (text_width, text_height), baseline = cv2.getTextSize(letter_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
         
-        # Position in upper portion of screen (not dead center)
+        # Position at very top of screen (same height as instruction text)
         text_x = (w - text_width) // 2
-        text_y = int(h * 0.25) + text_height  # 25% down from top instead of center
+        text_y = 80 + text_height  # Same level as instruction text, just below it
         
         # Add background rectangle for better visibility (smaller padding)
         padding = 20  # Smaller padding for smaller text
@@ -1045,14 +1045,14 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
         # Draw the big letter
         cv2.putText(frame, letter_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
         
-        # Small confidence text below the letter
+        # Small confidence text below the letter (keeping it compact at top)
         if prediction != "Show Hand":
             conf_text = f"{confidence:.2f}"
-            small_font_scale = 1.2  # Proportionally smaller
+            small_font_scale = 1.0  # Even smaller to keep it compact
             small_thickness = 2
             (conf_width, conf_height), _ = cv2.getTextSize(conf_text, cv2.FONT_HERSHEY_SIMPLEX, small_font_scale, small_thickness)
             conf_x = (w - conf_width) // 2
-            conf_y = text_y + text_height + 40  # Closer to main text
+            conf_y = text_y + 30  # Keep it very close and compact
             cv2.putText(frame, conf_text, (conf_x, conf_y), cv2.FONT_HERSHEY_SIMPLEX, small_font_scale, (255, 255, 255), small_thickness)
         
         # Draw FPS and performance stats (moved to bottom-left to avoid interfering with big prediction)
