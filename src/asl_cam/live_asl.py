@@ -104,6 +104,13 @@ class LiveASLRecognizer:
         self.capture_enabled = True
         self.last_processed_hand = None
         self.last_capture_frame = None
+        
+        # --- Prediction smoothing to reduce jumpiness ---
+        self.prediction_buffer = []  # Store recent predictions
+        self.buffer_size = 5  # Number of frames to consider for smoothing
+        self.min_consensus = 3  # Minimum number of same predictions to update display
+        self.displayed_prediction = "Show Hand"  # What we actually show (smoothed)
+        self.displayed_confidence = 0.0
 
         self.STATUS_COLORS = {
             "TRACKED": (0, 255, 0),       # Green for stable tracking
@@ -168,6 +175,50 @@ class LiveASLRecognizer:
         except Exception as e:
             logger.error(f"❌ Prediction error: {e}")
             return "Error", 0.0
+    
+    def _update_smoothed_prediction(self, prediction: str, confidence: float) -> None:
+        """
+        Update the prediction buffer and determine if we should change the displayed prediction.
+        This reduces jumpiness by requiring consistent predictions over multiple frames.
+        """
+        # Add new prediction to buffer
+        self.prediction_buffer.append((prediction, confidence))
+        
+        # Keep buffer at specified size
+        if len(self.prediction_buffer) > self.buffer_size:
+            self.prediction_buffer.pop(0)
+        
+        # Count occurrences of each prediction in buffer
+        prediction_counts = {}
+        total_confidence = {}
+        
+        for pred, conf in self.prediction_buffer:
+            if pred not in prediction_counts:
+                prediction_counts[pred] = 0
+                total_confidence[pred] = 0.0
+            prediction_counts[pred] += 1
+            total_confidence[pred] += conf
+        
+        # Find most frequent prediction
+        most_frequent_pred = max(prediction_counts, key=prediction_counts.get)
+        most_frequent_count = prediction_counts[most_frequent_pred]
+        
+        # Only update displayed prediction if we have enough consensus
+        if most_frequent_count >= self.min_consensus:
+            # Calculate average confidence for this prediction
+            avg_confidence = total_confidence[most_frequent_pred] / most_frequent_count
+            
+            # Update displayed prediction only if it's different or confidence is significantly different
+            if (most_frequent_pred != self.displayed_prediction or 
+                abs(avg_confidence - self.displayed_confidence) > 0.1):
+                
+                self.displayed_prediction = most_frequent_pred
+                self.displayed_confidence = avg_confidence
+                
+                # Log when prediction changes for debugging
+                if most_frequent_pred != "Show Hand":
+                    logger.debug(f"🎯 Prediction stabilized: {most_frequent_pred} ({avg_confidence:.3f}) "
+                               f"after {most_frequent_count}/{self.buffer_size} frames")
     
     def _capture_and_visualize_hand_data(self, frame: np.ndarray, processed_hand: np.ndarray, 
                                        hand_info: Dict, prediction: str, confidence: float) -> None:
@@ -970,17 +1021,20 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
             if confidence < self.min_pred_confidence:
                 prediction, confidence = None, 0.0
 
-        # Store last results for UI drawing and capture
+        # Store last results for UI drawing and capture (raw predictions)
         self.last_hand_info = hand_info
         self.last_processed_hand = processed_hand
         self.last_capture_frame = frame.copy()
         
+        # Update smoothed predictions for stable display
         if prediction is not None:
-            self.last_prediction = prediction
+            self.last_prediction = prediction  # Keep raw prediction for capture/debug
             self.last_confidence = confidence
+            self._update_smoothed_prediction(prediction, confidence)
         else:
             self.last_prediction = "Show Hand"
             self.last_confidence = 0.0
+            self._update_smoothed_prediction("Show Hand", 0.0)
             
     def _draw_ui(self, frame: np.ndarray) -> np.ndarray:
         """
@@ -999,8 +1053,9 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
 
         # --- Normal UI ---
         hand_info = self.last_hand_info
-        prediction = self.last_prediction
-        confidence = self.last_confidence
+        # Use smoothed predictions for stable display
+        prediction = self.displayed_prediction
+        confidence = self.displayed_confidence
         
         # Draw bounding box and status
         if hand_info and hand_info.get("bbox") is not None:
@@ -1071,7 +1126,7 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
         # Draw FPS and performance stats (moved to bottom-left to avoid interfering with big prediction)
         if self.show_stats:
             fps = self.fps_tracker.get_fps()
-            stats_y_start = h - 120  # Start from bottom
+            stats_y_start = h - 150  # Start from bottom (more space for smoothing info)
             
             cv2.putText(frame, f"FPS: {fps:.1f}", (10, stats_y_start), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             
@@ -1082,6 +1137,10 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
             # Show target FPS
             cv2.putText(frame, f"Target: {self.target_fps} FPS", (10, stats_y_start + 60), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+            
+            # Show prediction smoothing status
+            cv2.putText(frame, f"Smoothing: {self.min_consensus}/{self.buffer_size}", 
+                       (10, stats_y_start + 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
             
         # --- PAUSED indicator ---
         if self.paused:
@@ -1167,6 +1226,20 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
                 )
             else:
                 logger.warning("❌ No hand data available for model evaluation")
+        elif key == ord('x'):
+            # Adjust prediction smoothing
+            if self.min_consensus < self.buffer_size:
+                self.min_consensus += 1
+                logger.info(f"🎯 Prediction smoothing increased: {self.min_consensus}/{self.buffer_size} frames required")
+            else:
+                logger.info(f"⚠️ Already at maximum smoothing: {self.min_consensus}/{self.buffer_size}")
+        elif key == ord('z'):
+            # Reduce prediction smoothing
+            if self.min_consensus > 1:
+                self.min_consensus -= 1
+                logger.info(f"⚡ Prediction smoothing reduced: {self.min_consensus}/{self.buffer_size} frames required")
+            else:
+                logger.info(f"⚠️ Already at minimum smoothing: {self.min_consensus}/{self.buffer_size}")
 
     def run(self):
         """Main loop for the application."""
@@ -1181,6 +1254,7 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
         logger.info("  P: Toggle performance mode (skip frames for higher FPS)")
         logger.info("  +/-: Adjust frame skip rate manually")
         logger.info("  M: 🧪 Model performance evaluation")
+        logger.info("  X/Z: Increase/decrease prediction smoothing (reduce jumpiness)")
         logger.info("")
         
         self.cap = cv2.VideoCapture(self.camera_index)
