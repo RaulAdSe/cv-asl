@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict
 import logging
 import uuid
+import argparse
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -1299,28 +1300,31 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
         cv2.destroyAllWindows()
 
     def _denormalize_for_visualization(self, tensor_img: torch.Tensor) -> np.ndarray:
-        """Denormalize a tensor image and convert to a displayable format."""
-        if tensor_img is None or tensor_img.size() == 0:
-            return None
-
-        # Denormalize the image
-        mean = torch.tensor([0.485, 0.456, 0.406], device=tensor_img.device)
-        std = torch.tensor([0.229, 0.224, 0.225], device=tensor_img.device)
-        denormalized_img = tensor_img * std + mean
-        denormalized_img = torch.clamp(denormalized_img, 0, 1)
-
-        # Convert to numpy array
-        denormalized_np = denormalized_img.cpu().numpy()
-        if len(denormalized_np.shape) == 4:
-            denormalized_np = denormalized_np[0]
-        if len(denormalized_np.shape) == 3 and denormalized_np.shape[0] == 3:
-            denormalized_np = np.transpose(denormalized_np, (1, 2, 0))
-
-        return denormalized_np
+        """Denormalize tensor image for visualization"""
+        # Implementation depends on the normalization used during training
+        # This is a standard denormalization for ImageNet-based models
+        mean = np.array([0.485, 0.456, 0.406])
+        std = np.array([0.229, 0.224, 0.225])
+        
+        # Denormalize
+        denormalized_img = tensor_img.cpu().numpy().transpose((1, 2, 0))
+        denormalized_img = std * denormalized_img + mean
+        denormalized_img = np.clip(denormalized_img, 0, 1)
+        
+        # Convert to BGR for OpenCV
+        return (denormalized_img * 255).astype(np.uint8)[:, :, ::-1]
 
 def main():
     """Main function to run the recognizer"""
-    recognizer = LiveASLRecognizer()
+    parser = argparse.ArgumentParser(description="Live ASL Recognition System")
+    parser.add_argument(
+        "--model", 
+        default="models/best_mobilenetv2_model.pth",
+        help="Path to the trained ASL model checkpoint"
+    )
+    args = parser.parse_args()
+
+    recognizer = LiveASLRecognizer(model_path=args.model)
     if recognizer.model:
         recognizer.run()
 

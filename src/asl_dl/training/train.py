@@ -115,6 +115,11 @@ class ASLDataset(Dataset):
                             'path': img_path,
                             'label': class_name
                         })
+                    for img_path in class_dir.glob("*.jpeg"):
+                        samples.append({
+                            'path': img_path,
+                            'label': class_name
+                        })
                     for img_path in class_dir.glob("*.png"):
                         samples.append({
                             'path': img_path,
@@ -612,62 +617,96 @@ def compare_models(data_dir: str, config: Dict) -> Dict:
     
     return results
 
-def train_quick_demo():
-    """Quick training demo with sample data from collected images"""
+def main():
+    """Main training script with different modes."""
     import argparse
     
-    parser = argparse.ArgumentParser(description="ASL Model Training")
-    parser.add_argument("--data", default="data/raw", help="Data directory")
-    parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
-    parser.add_argument("--model", default="mobilenetv2", choices=["mobilenetv2", "mobilenetv2_lite"])
-    parser.add_argument("--dry-run", action="store_true", help="Show estimates only")
+    parser = argparse.ArgumentParser(
+        description="ASL Model Training Script",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    
+    parser.add_argument(
+        "--mode", 
+        default="custom", 
+        choices=["custom", "kaggle_abc", "compare"], 
+        help=(
+            "Select training mode:\\n"
+            "  - custom: Train on a specified data directory (default).\\n"
+            "  - kaggle_abc: Train specifically on the Kaggle A,B,C dataset.\\n"
+            "  - compare: Train and compare multiple model architectures."
+        )
+    )
+    parser.add_argument("--data-dir", default="data/raw", help="Data directory (for 'custom' mode).")
+    parser.add_argument("--epochs", type=int, default=15, help="Number of training epochs.")
+    parser.add_argument("--model", default="mobilenetv2", choices=["mobilenetv2", "mobilenetv2_lite", "mediapipe"], help="Model architecture for 'custom' mode.")
+    parser.add_argument("--lr", type=float, default=0.001, help="Learning rate.")
     
     args = parser.parse_args()
     
-    # Simple configuration
+    # --- Base Config ---
     config = {
-        'batch_size': 32,
-        'learning_rate': 0.001,
+        'learning_rate': args.lr,
         'num_epochs': args.epochs,
-        'weight_decay': 1e-4,
-        'scheduler_step': 5,
-        'input_size': 224 if args.model == "mobilenetv2" else 192,
-        'num_workers': 2
+        'num_workers': min(os.cpu_count(), 4) # Safe default for num_workers
     }
     
-    logger.info(f"🚀 ASL Training - {args.model}")
-    logger.info(f"Data: {args.data}")
-    logger.info(f"Epochs: {args.epochs}")
-    
-    if args.dry_run:
-        logger.info("📊 Dry run mode - showing estimates")
-        data_path = Path(args.data)
-        if data_path.exists():
-            logger.info(f"✅ Data directory found: {data_path}")
-        else:
-            logger.info(f"❌ Data directory not found: {data_path}")
-            logger.info("📝 Collect some data first using:")
-            logger.info("   python -m src.asl_cam.collect")
-        return
-    
-    # Create directories
+    # --- Mode-specific Logic ---
+    if args.mode == 'kaggle_abc':
+        logger.info("🚀 Training Mode: Kaggle A, B, C")
+        data_dir = "data/raw/kaggle_asl/train"
+        model_type = "mobilenetv2"
+        
+        # Verify dataset
+        if not Path(data_dir).exists():
+            logger.error(f"❌ Kaggle ABC dataset not found at {data_dir}. Please run the download.")
+            return
+
+        config.update({
+            'batch_size': 32,
+            'weight_decay': 1e-4,
+            'scheduler_step': 7,
+            'input_size': 224,
+            'width_mult': 1.0
+        })
+        
+        trainer = ASLTrainer(config)
+        trainer.train(data_dir, model_type)
+
+    elif args.mode == 'custom':
+        logger.info(f"🚀 Training Mode: Custom Dataset")
+        data_dir = args.data_dir
+        model_type = args.model
+        
+        config.update({
+            'batch_size': 32,
+            'weight_decay': 1e-4,
+            'scheduler_step': 5,
+            'input_size': 224 if model_type == "mobilenetv2" else 192,
+        })
+        
+        trainer = ASLTrainer(config)
+        trainer.train(data_dir, model_type)
+        
+    elif args.mode == 'compare':
+        logger.info("🚀 Training Mode: Compare Models on Kaggle ABC dataset")
+        data_dir = "data/raw/kaggle_asl/train"
+        
+        # Verify dataset
+        if not Path(data_dir).exists():
+            logger.error(f"❌ Kaggle ABC dataset not found at {data_dir} for comparison. Please run the download.")
+            return
+            
+        compare_models(data_dir, config)
+
+if __name__ == "__main__":
     os.makedirs("models", exist_ok=True)
     os.makedirs("logs", exist_ok=True)
     
-    # Start training
-    trainer = ASLTrainer(config)
-    
     try:
-        results = trainer.train(args.data, args.model)
-        logger.info(f"🎉 Training completed!")
-        logger.info(f"📈 Best accuracy: {results['best_accuracy']:.2f}%")
-        logger.info(f"🚀 Inference speed: {results['benchmark']['fps']:.1f} FPS")
-        logger.info(f"💾 Model saved to: models/best_{args.model}_model.pth")
-        
+        main()
+        logger.info("🎉 Training script finished.")
     except KeyboardInterrupt:
-        logger.info("Training interrupted by user")
+        logger.info("🎉 Training interrupted by user.")
     except Exception as e:
-        logger.error(f"Training failed: {e}")
-
-if __name__ == "__main__":
-    train_quick_demo()
+        logger.error(f"❌ An error occurred during training: {e}", exc_info=True)
