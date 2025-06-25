@@ -33,13 +33,15 @@ ENV/
 *.swp
 *.swo
 
-# Project specific
-data/raw/
-data/processed/
+# Project specific - Data & Models
+data/
 models/
 *.pt
 *.pth
 *.onnx
+*.pkl
+*.h5
+*.bin
 
 # Logs
 *.log
