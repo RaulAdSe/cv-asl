@@ -1018,13 +1018,18 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
         # Draw BIG centered prediction
         h, w = frame.shape[:2]
         
-        # Only show the letter, make it HUGE and centered
+        # Only show the letter with beautiful colors
         if prediction != "Show Hand" and confidence > self.min_pred_confidence:
             letter_text = prediction
-            color = (0, 255, 0)  # Green for confident predictions
+            if confidence > 0.8:
+                color = (0, 255, 0)    # Bright green for very confident
+            elif confidence > 0.6:
+                color = (0, 255, 180)  # Green-cyan for confident
+            else:
+                color = (0, 200, 255)  # Light blue for moderately confident
         else:
             letter_text = "?" if prediction == "Show Hand" else prediction
-            color = (0, 255, 255)  # Yellow for uncertain/no prediction
+            color = (100, 200, 255)  # Soft blue for uncertain/no prediction
         
         # Calculate text size for upper positioning
         font_scale = 5  # About 35% of previous size (was 15)
@@ -1035,25 +1040,33 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
         text_x = (w - text_width) // 2
         text_y = 80 + text_height  # Same level as instruction text, just below it
         
-        # Add background rectangle for better visibility (smaller padding)
-        padding = 20  # Smaller padding for smaller text
-        cv2.rectangle(frame, 
-                     (text_x - padding, text_y - text_height - padding), 
-                     (text_x + text_width + padding, text_y + baseline + padding),
-                     (0, 0, 0), -1)  # Black background
+        # Draw text with elegant outline for better visibility (no background rectangle)
+        outline_thickness = thickness + 4  # Thicker outline
         
-        # Draw the big letter
-        cv2.putText(frame, letter_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
+        # Draw black outline first for contrast
+        cv2.putText(frame, letter_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 
+                   font_scale, (0, 0, 0), outline_thickness)
         
-        # Small confidence text below the letter (keeping it compact at top)
+        # Draw the main letter text on top
+        cv2.putText(frame, letter_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 
+                   font_scale, color, thickness)
+        
+        # Small confidence text below the letter with matching style
         if prediction != "Show Hand":
             conf_text = f"{confidence:.2f}"
             small_font_scale = 1.0  # Even smaller to keep it compact
             small_thickness = 2
+            small_outline_thickness = small_thickness + 2
             (conf_width, conf_height), _ = cv2.getTextSize(conf_text, cv2.FONT_HERSHEY_SIMPLEX, small_font_scale, small_thickness)
             conf_x = (w - conf_width) // 2
             conf_y = text_y + 30  # Keep it very close and compact
-            cv2.putText(frame, conf_text, (conf_x, conf_y), cv2.FONT_HERSHEY_SIMPLEX, small_font_scale, (255, 255, 255), small_thickness)
+            
+            # Draw outline first
+            cv2.putText(frame, conf_text, (conf_x, conf_y), cv2.FONT_HERSHEY_SIMPLEX, 
+                       small_font_scale, (0, 0, 0), small_outline_thickness)
+            # Draw main confidence text
+            cv2.putText(frame, conf_text, (conf_x, conf_y), cv2.FONT_HERSHEY_SIMPLEX, 
+                       small_font_scale, (255, 255, 255), small_thickness)
         
         # Draw FPS and performance stats (moved to bottom-left to avoid interfering with big prediction)
         if self.show_stats:
