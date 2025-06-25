@@ -88,7 +88,8 @@ python run_live_asl.py
 
 ### 3. Collect Training Data
 ```bash
-python collect_live_training_data.py
+# Data collection is built into the live system - use SPACE key during live recognition
+python run_live_asl.py  # Press SPACE to capture training data
 ```
 
 ### 4. Train Custom Model
@@ -172,8 +173,7 @@ CV-asl/
 │       └── visualization/   # Training monitoring
 ├── tests/                   # Comprehensive test suite
 ├── documentation/           # Technical documentation
-├── run_live_asl.py         # Main application entry
-└── collect_live_training_data.py  # Data collection tool
+└── run_live_asl.py         # Main application entry (includes data capture)
 ```
 
 ## 🎯 Key Insights & Learnings
