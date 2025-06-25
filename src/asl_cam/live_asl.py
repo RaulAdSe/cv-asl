@@ -1026,17 +1026,17 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
             letter_text = "?" if prediction == "Show Hand" else prediction
             color = (0, 255, 255)  # Yellow for uncertain/no prediction
         
-        # Calculate text size for perfect centering
-        font_scale = 15  # Much bigger font
-        thickness = 20
+        # Calculate text size for upper positioning
+        font_scale = 5  # About 35% of previous size (was 15)
+        thickness = 8   # Proportionally smaller thickness
         (text_width, text_height), baseline = cv2.getTextSize(letter_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
         
-        # Center the text
+        # Position in upper portion of screen (not dead center)
         text_x = (w - text_width) // 2
-        text_y = (h + text_height) // 2
+        text_y = int(h * 0.25) + text_height  # 25% down from top instead of center
         
-        # Add background rectangle for better visibility
-        padding = 50
+        # Add background rectangle for better visibility (smaller padding)
+        padding = 20  # Smaller padding for smaller text
         cv2.rectangle(frame, 
                      (text_x - padding, text_y - text_height - padding), 
                      (text_x + text_width + padding, text_y + baseline + padding),
@@ -1045,14 +1045,14 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
         # Draw the big letter
         cv2.putText(frame, letter_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
         
-        # Small confidence text below the big letter
+        # Small confidence text below the letter
         if prediction != "Show Hand":
             conf_text = f"{confidence:.2f}"
-            small_font_scale = 2
-            small_thickness = 3
+            small_font_scale = 1.2  # Proportionally smaller
+            small_thickness = 2
             (conf_width, conf_height), _ = cv2.getTextSize(conf_text, cv2.FONT_HERSHEY_SIMPLEX, small_font_scale, small_thickness)
             conf_x = (w - conf_width) // 2
-            conf_y = text_y + text_height + 80
+            conf_y = text_y + text_height + 40  # Closer to main text
             cv2.putText(frame, conf_text, (conf_x, conf_y), cv2.FONT_HERSHEY_SIMPLEX, small_font_scale, (255, 255, 255), small_thickness)
         
         # Draw FPS and performance stats (moved to bottom-left to avoid interfering with big prediction)
