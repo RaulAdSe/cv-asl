@@ -7,8 +7,14 @@ import os
 from pathlib import Path
 import pytest
 
-from ..collect import DataCollector
-from ..vision.background_removal import BackgroundMethod
+import sys
+from pathlib import Path
+
+# Add src to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
+
+from asl_cam.collect import DataCollector
+from asl_cam.vision.background_removal import BackgroundMethod
 
 
 class TestDataCollectorBackgroundRemoval:
@@ -136,7 +142,7 @@ class TestDataCollectorBackgroundRemoval:
             def __init__(self):
                 self.method = BackgroundMethod.GRABCUT
             
-            def remove_background(self, image, hand_bbox):
+            def remove_background_from_crop(self, hand_crop, skin_mask_crop=None):
                 return None  # Simulate failure
         
         self.collector.bg_remover = MockBGRemover()

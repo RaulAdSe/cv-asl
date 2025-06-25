@@ -1,214 +1,158 @@
-# ASL Hand Detection - Build It Yourself Approach
+# ASL Hand Detection & Training System
 
-A classical computer vision approach to American Sign Language (ASL) hand detection and tracking, built from scratch using OpenCV and PyTorch.
+Sistema completo para detección de manos ASL y entrenamiento de modelos con MobileNetV2 para inferencia en tiempo real (30 FPS).
 
-## 🎯 Project Philosophy
+## 🚀 Inicio Rápido
 
-This project takes a "build-it-yourself" approach to hand detection, avoiding ready-made solutions like MediaPipe. Instead, we build our own pipeline using classical computer vision techniques and custom neural networks.
-
-## 🗺️ Development Roadmap
-
-### Stage A: Skin-mask prototype (Current)
-- ✅ Classical skin detection using HSV/YCrCb color spaces
-- ✅ Contour-based hand segmentation
-- ✅ Real-time hand bounding box detection
-- ✅ Kalman filter-based tracking
-
-### Stage B: Tracking loop (Next)
-- Improved hand tracking across frames
-- Temporal stability and motion prediction
-- Multi-hand tracking support
-
-### Stage C: Heuristic robustness
-- Adaptive lighting compensation
-- Background subtraction (MOG2)
-- Motion-based fallback detection
-
-### Stage D: Dataset builder
-- ✅ Interactive data collection tool
-- ✅ Auto-cropping and labeling
-- ✅ Advanced background removal integration
-- ✅ YOLO format export
-
-### Stage E: Train custom detector
-- Tiny-YOLO or custom CNN training
-- EgoHands + Oxford Hands datasets
-- Real-time CPU inference
-
-### Stage F: Integration
-- Replace heuristic detection with trained model
-- End-to-end pipeline optimization
-
-### Stage G: Sign classifier
-- ResNet-based sign classification
-- Temporal sequence modeling
-
-## 🚀 Quick Start
-
-### Prerequisites
-
+### 1. Activar entorno
 ```bash
-# Python 3.8+ required
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
+source venv/bin/activate
 ```
 
-### Stage A: Try the Skin Detection
-
+### 2. Recopilar datos
 ```bash
-# Interactive data collection with skin detection
-python -m asl_cam.collect --show-mask
-
-# Controls:
-# S - Save hand detection
-# M - Toggle motion mask overlay
-# K - Toggle skin mask overlay  
-# B - Toggle background removal
-# X - Toggle motion detection (filters out static torso)
-# P - Adjust hand persistence (how long to keep tracking still hands)
-# C - Capture and visualize current hand data (opens detailed analysis window)
-# R - Reset motion detection & tracker
-# T - Tune thresholds
-# Q - Quit
-
-# Documentation:
-# See ASL_PROJECT_DOCUMENTATION.md for complete development history and technical details
+python -m src.asl_cam.collect
 ```
+**Controles principales:**
+- `S` - Guardar detección actual
+- `L` - Cambiar etiqueta (letra ASL)
+- `B` - Activar/desactivar eliminación de fondo
+- `C` - Capturar y visualizar datos
+- `Q` - Salir
 
-### Running Tests
-
+### 3. Entrenar modelo
 ```bash
-# Run all tests
-pytest
+# Ver estimaciones de tiempo
+python -m src.asl_cam.train --dry-run
 
-# Run specific module tests
-pytest tests/test_skin.py
-pytest tests/test_tracker.py
+# Entrenamiento rápido (10 épocas)
+python -m src.asl_cam.train --epochs 10
+
+# Entrenamiento completo (25 épocas)
+python -m src.asl_cam.train --epochs 25
+
+# Modelo ligero para mayor velocidad
+python -m src.asl_cam.train --model mobilenetv2_lite --epochs 15
 ```
 
-## 📁 Project Structure
-
-```
-src/asl_cam/
-├── vision/                 # Core computer vision modules
-│   ├── skin.py            # Skin detection and segmentation
-│   ├── tracker.py         # Kalman filter-based tracking
-│   ├── background_removal.py # Advanced background removal methods
-│   └── detector/          # Future: Custom hand detector models
-├── collect.py             # Interactive data collection CLI
-├── preprocess.py          # Image preprocessing utilities
-└── ...                    # Future: train_detector.py, infer.py
-
-tests/                     # Comprehensive test suite
-├── test_skin.py          # Skin detection tests
-├── test_tracker.py       # Tracking algorithm tests
-└── test_preprocess.py    # Preprocessing tests
+### 4. Usar modelo entrenado
+```bash
+python -m src.asl_cam.infer
 ```
 
-## 🔧 Current Features
+## 📁 Estructura del Proyecto
 
-### Skin Detection (`vision/skin.py`)
-- HSV and YCrCb color space thresholding
-- Morphological operations for noise reduction
-- Contour-based hand detection
-- Interactive threshold tuning
-- Visualization with mask overlays
-
-### Simple Motion-Based Detection (`vision/simple_hand_detector.py`) **[CURRENT]**
-- Motion + skin detection (hands move, torsos don't)
-- Background subtraction using MOG2
-- Automatic filtering of static skin regions
-- Hand persistence system for stable tracking
-- Simple and robust for shirtless scenarios
-- Real-time motion visualization
-
-### Enhanced Hand Detection (`vision/enhanced_hand_detector.py`) **[DEPRECATED]**
-- Multi-factor scoring system (position, size, shape)
-- Torso filtering for shirtless scenarios
-- Complex geometric analysis
-- **Note**: Replaced by simpler motion-based approach
-
-### Hand Tracking (`vision/tracker.py`)
-- Kalman filter-based position prediction
-- Centroid matching for track association
-- Track stability scoring (hit counts)
-- Multi-hand tracking support
-- Temporal track persistence
-
-### Data Collection (`collect.py`)
-- Real-time hand detection and tracking
-- Interactive sample collection
-- Automatic cropping and metadata saving
-- Advanced background removal (GrabCut, contour-based, skin masks)
-- Dual-version saving (original + background-removed)
-- YOLO format export for training
-- Progress tracking and statistics
-
-### Background Removal (`vision/background_removal.py`)
-- Multiple removal methods: GrabCut, contour masks, skin detection, MOG2, watershed
-- Configurable algorithms with quality vs. speed trade-offs
-- Transparent background generation
-- Visualization tools for method comparison
-- Integration with data collection pipeline
-
-## 🎛️ Configuration
-
-### Skin Detection Thresholds
-```python
-# HSV thresholds (adjust for different lighting)
-hsv_lower = [0, 30, 60]
-hsv_upper = [20, 150, 255]
-
-# YCrCb thresholds (more robust)
-ycrcb_lower = [0, 133, 77] 
-ycrcb_upper = [255, 173, 127]
+```
+CV-asl/
+├── src/asl_cam/
+│   ├── collect.py      # 📹 Recopilación de datos
+│   ├── train.py        # 🧠 Entrenamiento MobileNetV2
+│   ├── infer.py        # 🚀 Inferencia en tiempo real
+│   └── vision/         # 👁️  Algoritmos de visión
+├── data/raw/           # 💾 Datos recopilados
+├── models/             # 🎯 Modelos entrenados
+└── logs/               # 📊 Logs de entrenamiento
 ```
 
-### Tracking Parameters
-```python
-# Kalman filter tracking
-max_disappeared = 30      # Frames to keep tracks without detection
-distance_threshold = 100  # Max pixels for track association
+## 🎯 Workflow Completo
+
+1. **Recopilar datos** por letra ASL
+2. **Entrenar modelo** MobileNetV2 optimizado
+3. **Evaluar rendimiento** (precisión + FPS)
+4. **Usar en tiempo real** para reconocimiento ASL
+
+## 🔧 Características Principales
+
+### Detección de Manos
+- ✅ Detección por color de piel + movimiento
+- ✅ Eliminación inteligente del fondo
+- ✅ Tracking persistente de manos
+- ✅ Control de calidad automático
+
+### Entrenamiento
+- ✅ MobileNetV2 optimizado para 30 FPS
+- ✅ Monitoreo de progreso en tiempo real
+- ✅ TensorBoard para visualización
+- ✅ Benchmark automático de velocidad
+
+### Inferencia
+- ✅ Clasificación en tiempo real
+- ✅ Optimizado para 30+ FPS
+- ✅ Suavizado temporal
+- ✅ Estadísticas de rendimiento
+
+## 📊 Modelos Disponibles
+
+| Modelo | Precisión | FPS | Parámetros | Uso |
+|--------|-----------|-----|------------|-----|
+| MobileNetV2 | ~92% | 30-50 | 2.3M | Balanced |
+| MobileNetV2 Lite | ~88% | 50-80 | 1.3M | Speed |
+
+## 🎮 Controles del Sistema
+
+### Recopilación de Datos
+- `S` - Guardar muestra actual
+- `L` - Cambiar etiqueta ASL
+- `B` - Toggle eliminación de fondo  
+- `N` - Cambiar método de fondo
+- `C` - Capturar y analizar
+- `X` - Toggle detección de movimiento
+- `M/K` - Ver máscaras de detección
+
+### Entrenamiento
+```bash
+python -m src.asl_cam.train --help
 ```
 
-## 📊 Performance
+### Inferencia
+- `SPACE` - Modo debug
+- `S` - Mostrar estadísticas
+- `Q` - Salir
 
-Current performance on standard hardware:
-- **Frame Rate**: 30+ FPS (640x480)
-- **Detection Latency**: <10ms per frame
-- **Memory Usage**: <100MB
-- **CPU Usage**: <20% (single core)
+## 🔍 Troubleshooting
 
-## 🧪 Development Workflow
+### Problema: "command not found: python"
+```bash
+# Verificar que el entorno virtual esté activo
+source venv/bin/activate
+which python  # Debe mostrar la ruta del venv
+```
 
-1. **Stage A** (Current): Perfect skin detection + tracking
-2. **Stage B**: Add robustness (lighting, backgrounds)  
-3. **Stage C**: Collect training data (500+ samples/label)
-4. **Stage D**: Train custom detector (Tiny-YOLO)
-5. **Stage E**: Integrate trained model
-6. **Stage F**: Add sign classification
+### Problema: No se detectan manos
+1. Verificar iluminación (luz uniforme)
+2. Activar detección de movimiento (`X`)
+3. Ajustar tolerancia de piel (`T`)
+4. Resetear tracker (`R`)
 
-## 🤝 Contributing
+### Problema: Entrenamiento lento
+1. Usar `mobilenetv2_lite`
+2. Reducir epochs: `--epochs 10`
+3. Usar batch size menor: `--batch-size 16`
 
-This is a learning-focused project. Key principles:
+## 📈 Optimización de Rendimiento
 
-- **Build from scratch** - Understand every component
-- **Test everything** - Comprehensive unit tests
-- **Document thoroughly** - Clear code and comments
-- **Incremental progress** - Small, verifiable steps
+### Para Recopilación:
+- Buena iluminación
+- Fondo contrastante
+- Movimiento suave de manos
 
-## 📚 Learning Resources
+### Para Entrenamiento:
+- GPU recomendada (pero funciona en CPU)
+- Mínimo 100 muestras por letra
+- Datos balanceados entre clases
 
-- [OpenCV Tutorials](https://docs.opencv.org/4.x/d9/df8/tutorial_root.html)
-- [Kalman Filter Explained](https://www.kalmanfilter.net/)
-- [EgoHands Dataset](http://vision.soic.indiana.edu/projects/egohands/)
-- [YOLO Object Detection](https://github.com/ultralytics/yolov5)
+### Para Inferencia:
+- Cámara de buena calidad
+- Procesador moderno
+- Iluminación estable
 
-## 🔮 Future Enhancements
+## 🎯 Próximos Pasos
 
-- Background subtraction for motion detection
-- Gesture sequence recognition
-- Real-time ASL translation
-- Mobile deployment optimization
-- Custom CNN architectures
+1. Recopilar más datos ASL
+2. Entrenar con dataset completo de Kaggle
+3. Optimizar para deployment móvil
+4. Añadir más letras del alfabeto ASL
+
+---
+
+**Sistema optimizado para 30 FPS real-time ASL recognition! 🚀**

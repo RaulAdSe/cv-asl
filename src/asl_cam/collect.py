@@ -23,12 +23,15 @@ import argparse
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict
 from dataclasses import dataclass, asdict
+import logging
 
 from .vision.skin import SkinDetector
 from .vision.enhanced_hand_detector import EnhancedHandDetector
 from .vision.simple_hand_detector import SimpleHandDetector
-from .vision.tracker import MultiHandTracker, TrackedHand
-from .vision.background_removal import BackgroundRemover, BackgroundMethod
+from .vision.background_removal import BackgroundRemover
+from .preprocess import Preprocessor
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class Sample:
@@ -61,6 +64,12 @@ class DataCollector:
         self.detector = SimpleHandDetector()  # Use simple motion-based detection
         self.tracker = MultiHandTracker(max_hands=1, max_disappeared=10)  # Single hand, faster cleanup
         self.bg_remover = BackgroundRemover(BackgroundMethod.GRABCUT)  # High-quality background removal
+        
+        # Simple background removal method cycling
+        self.bg_methods = [BackgroundMethod.GRABCUT, BackgroundMethod.CONTOUR_MASK, BackgroundMethod.SKIN_MASK]
+        self.bg_method_names = ["dominant", "adaptive", "edge"]
+        self.current_bg_method_idx = 0
+        self.bg_tolerance = 40  # Color tolerance for background removal
         
         # Collection state
         self.samples: List[Sample] = []
@@ -181,10 +190,12 @@ class DataCollector:
         processed_crop = hand_crop
         bg_removed_crop = None
         if self.use_background_removal:
-            # Apply background removal to get clean hand image
-            # Create relative bbox for the crop (since crop is already extracted)
-            crop_bbox = (0, 0, hand_crop.shape[1], hand_crop.shape[0])
-            result = self.bg_remover.remove_background(hand_crop, crop_bbox)
+            # Get skin mask for the hand region to improve background removal
+            skin_mask = self.detector.detect_skin_mask(frame)
+            skin_mask_crop = skin_mask[y:y+h, x:x+w] if skin_mask is not None else None
+            
+            # Apply enhanced background removal designed for hand crops
+            result = self.bg_remover.remove_background_from_crop(hand_crop, skin_mask_crop)
             if result is not None:
                 bg_removed_crop, mask = result  # Unpack the tuple
                 if bg_removed_crop is not None:
@@ -258,8 +269,12 @@ class DataCollector:
         # Apply background removal if enabled
         processed_crop = hand_crop.copy()
         if self.use_background_removal:
-            crop_bbox = (0, 0, hand_crop.shape[1], hand_crop.shape[0])
-            result = self.bg_remover.remove_background(hand_crop, crop_bbox)
+            # Get skin mask for the hand region to improve background removal
+            skin_mask = self.detector.detect_skin_mask(frame)
+            skin_mask_crop = skin_mask[y:y+h, x:x+w] if skin_mask is not None else None
+            
+            # Apply enhanced background removal designed for hand crops
+            result = self.bg_remover.remove_background_from_crop(hand_crop, skin_mask_crop)
             if result is not None:
                 bg_removed_crop, mask = result
                 if bg_removed_crop is not None:
@@ -451,6 +466,8 @@ Persistence: {self.detector.max_persistence_frames}f
         print("  M - Toggle motion mask overlay")
         print("  K - Toggle skin mask overlay")
         print("  B - Toggle background removal")
+        print("  N - Cycle background removal method (dominant/adaptive/edge)")
+        print("  Z - Adjust background removal tolerance (strictness)")
         print("  X - Toggle motion detection (filters out static torso)")
         print("  P - Adjust hand persistence (how long to keep tracking still hands)")
         print("  C - Capture and visualize current hand data")
@@ -515,7 +532,11 @@ Persistence: {self.detector.max_persistence_frames}f
             info_y += line_height
             
             # Collection info
-            bg_status = "BG-Remove: ON" if self.use_background_removal else "BG-Remove: OFF"
+            if self.use_background_removal:
+                bg_method = self.bg_method_names[self.current_bg_method_idx]
+                bg_status = f"BG: {bg_method}({self.bg_tolerance})"
+            else:
+                bg_status = "BG: OFF"
             motion_status = "Motion: ON" if self.use_motion_detection else "Motion: OFF"
             persist_frames = self.detector.max_persistence_frames
             persist_status = f"Persist: {persist_frames}f"
@@ -564,6 +585,27 @@ Persistence: {self.detector.max_persistence_frames}f
                 # Toggle background removal
                 self.use_background_removal = not self.use_background_removal
                 print(f"Background removal: {'ON' if self.use_background_removal else 'OFF'}")
+            elif key == ord('n'):
+                # Cycle background removal method
+                self.current_bg_method_idx = (self.current_bg_method_idx + 1) % len(self.bg_methods)
+                new_method = self.bg_methods[self.current_bg_method_idx]
+                method_name = self.bg_method_names[self.current_bg_method_idx]
+                self.bg_remover = BackgroundRemover(new_method)
+                self.bg_remover.remover.color_tolerance = self.bg_tolerance
+                print(f"Background removal method: {method_name} (simple color-based)")
+                if not self.use_background_removal:
+                    print("  (Enable with 'B' key to see effect)")
+            elif key == ord('z'):
+                # Adjust background removal tolerance
+                print(f"\nCurrent tolerance: {self.bg_tolerance} (lower = stricter)")
+                print("Options: 1=Very strict (20), 2=Strict (30), 3=Normal (40), 4=Loose (50), 5=Very loose (60)")
+                choice = input("Choose tolerance level (1-5): ")
+                tolerance_map = {'1': 20, '2': 30, '3': 40, '4': 50, '5': 60}
+                if choice in tolerance_map:
+                    self.bg_tolerance = tolerance_map[choice]
+                    self.bg_remover.remover.color_tolerance = self.bg_tolerance
+                    strictness = ["very strict", "strict", "normal", "loose", "very loose"][int(choice)-1]
+                    print(f"Background removal tolerance set to: {self.bg_tolerance} ({strictness})")
             elif key == ord('x'):
                 # Toggle motion detection
                 self.use_motion_detection = not self.use_motion_detection

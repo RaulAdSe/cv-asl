@@ -14,7 +14,13 @@ import pytest
 import numpy as np
 import cv2
 
-from src.asl_cam.preprocess import (
+import sys
+from pathlib import Path
+
+# Add src to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent.parent / "src"))
+
+from asl_cam.preprocess import (
     normalize_frame, enhance_lighting, gaussian_blur, adaptive_threshold_mask
 )
 

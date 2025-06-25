@@ -1,338 +1,145 @@
 """
-Simple and effective hand detection using motion + skin detection.
+Simple and effective hand detection using skin color and motion.
 
-The key insight: hands move, torsos don't. Combine motion detection with skin 
-detection to filter out static skin regions like torso.
+This detector provides a baseline for identifying hand regions using
+traditional computer vision techniques with OpenCV. It's designed to be
+lightweight and understandable.
+
+Key Improvements:
+- Heuristic-based confidence scoring.
+- More robust contour filtering.
 """
 import cv2
 import numpy as np
-from typing import List, Tuple, Optional
-from .skin import SkinDetector
+from typing import List, Tuple, Dict
+import logging
 
+from .skin import SkinDetector
+from .background_removal import BackgroundRemover
+
+logger = logging.getLogger(__name__)
 
 class SimpleHandDetector(SkinDetector):
-    """Simple hand detector using motion + skin detection."""
+    """Simple hand detector using skin color segmentation and motion analysis."""
     
-    def __init__(self):
+    def __init__(self, 
+                 min_area: int = 3000, 
+                 max_area: int = 40000,
+                 motion_threshold: int = 500):
         super().__init__()
         
-        # Motion detection - slower learning to maintain hand detection longer
         self.background_subtractor = cv2.createBackgroundSubtractorMOG2(
-            detectShadows=False, varThreshold=30, history=500)  # Slower learning, more sensitive
+            history=200, varThreshold=30, detectShadows=False
+        )
+        self.min_area = min_area
+        self.max_area = max_area
+        self.motion_threshold = motion_threshold
         
-        # Simple filtering parameters
-        self.min_area = 2000       # Minimum hand area
-        self.max_area = 35000      # Maximum hand area (smaller than before)
-        self.min_motion_area = 500  # Reduced threshold for motion
+        # --- NEW: Link to the advanced background remover ---
+        self.bg_remover = BackgroundRemover()
         
-        # Motion persistence - keep detecting hands even with less motion
-        self.motion_history = []
-        self.history_size = 10     # Longer history
-        self.learning_rate = 0.005  # Very slow background learning
-        
-        # Previous frame for frame differencing
-        self.prev_gray = None
-        
-        # Hand persistence tracking
-        self.last_hand_regions = []
-        self.hand_persistence_frames = 0
-        self.max_persistence_frames = 30  # Keep detecting for 30 frames without motion
-        
-    def detect_motion_mask(self, frame: np.ndarray) -> np.ndarray:
+    def _calculate_confidence(self, contour: np.ndarray, frame_shape: Tuple[int, int]) -> float:
         """
-        Detect motion using background subtraction with slow learning.
+        Calculate a heuristic-based confidence score for a hand contour.
         
         Args:
-            frame: Current BGR frame
+            contour: The contour of the potential hand.
+            frame_shape: The (height, width) of the frame.
             
         Returns:
-            Binary motion mask
+            A confidence score between 0.0 and 1.0.
         """
-        # Background subtraction with very slow learning rate
-        motion_mask = self.background_subtractor.apply(frame, learningRate=self.learning_rate)
+        area = cv2.contourArea(contour)
+        x, y, w, h = cv2.boundingRect(contour)
         
-        # Clean up motion mask
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        motion_mask = cv2.morphologyEx(motion_mask, cv2.MORPH_OPEN, kernel)
-        motion_mask = cv2.morphologyEx(motion_mask, cv2.MORPH_CLOSE, kernel)
+        # Score 1: Area confidence (peaks at a 'normal' hand size)
+        ideal_area = 20000
+        area_confidence = 1.0 - abs(area - ideal_area) / (self.max_area - self.min_area)
+        area_confidence = max(0, area_confidence)
+
+        # Score 2: Aspect ratio confidence (hands are usually not too skinny or wide)
+        aspect_ratio = w / float(h) if h > 0 else 0
+        ideal_aspect_ratio = 1.0
+        aspect_confidence = 1.0 - abs(aspect_ratio - ideal_aspect_ratio) / 1.5
+        aspect_confidence = max(0, aspect_confidence)
         
-        # Dilate to make motion regions more persistent
-        motion_mask = cv2.dilate(motion_mask, kernel, iterations=2)
+        # Score 3: Solidity (hands are complex shapes, not perfect blobs)
+        hull = cv2.convexHull(contour)
+        hull_area = cv2.contourArea(hull)
+        solidity = area / float(hull_area) if hull_area > 0 else 0
+        # Lower solidity is better for hands with fingers
+        solidity_confidence = 1.0 - solidity if solidity > 0.6 else 0.8 
         
-        return motion_mask
-    
-    def detect_frame_diff_motion(self, frame: np.ndarray) -> np.ndarray:
+        # Combine scores
+        total_confidence = (area_confidence * 0.4 + 
+                            aspect_confidence * 0.4 + 
+                            solidity_confidence * 0.2)
+                            
+        return min(1.0, max(0.0, total_confidence))
+
+    def detect_hands(self, frame: np.ndarray, max_hands: int = 1) -> List[Dict]:
         """
-        Detect motion using frame differencing (backup method).
+        Detects hands using the foreground mask from the background remover.
+        This is more robust than the previous skin/motion method.
         
         Args:
-            frame: Current BGR frame
+            frame: BGR input frame.
+            max_hands: Maximum number of hands to detect.
             
         Returns:
-            Binary motion mask
+            A list of dictionaries, where each dict contains 'bbox' and 'confidence'.
         """
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        # --- Use the advanced background remover to get a clean foreground mask ---
+        _, fg_mask = self.bg_remover.remove_background(frame)
+
+        if not self.bg_remover.bg_model_learned:
+            # If the background isn't learned yet, we can't detect hands.
+            return []
+
+        # Find contours on the clean foreground mask
+        contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        if self.prev_gray is None:
-            self.prev_gray = gray
-            return np.zeros_like(gray)
-        
-        # Frame difference
-        diff = cv2.absdiff(self.prev_gray, gray)
-        _, motion_mask = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
-        
-        # Clean up
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        motion_mask = cv2.morphologyEx(motion_mask, cv2.MORPH_OPEN, kernel)
-        motion_mask = cv2.dilate(motion_mask, kernel, iterations=2)
-        
-        self.prev_gray = gray
-        return motion_mask
-    
-    def combine_skin_and_motion(self, skin_mask: np.ndarray, 
-                               motion_mask: np.ndarray) -> np.ndarray:
-        """
-        Combine skin and motion masks with hand persistence.
-        
-        Args:
-            skin_mask: Binary skin detection mask
-            motion_mask: Binary motion detection mask
-            
-        Returns:
-            Combined mask showing moving skin regions with persistence
-        """
-        # Intersection of skin and motion
-        combined = cv2.bitwise_and(skin_mask, motion_mask)
-        
-        # Dilate motion mask to be more forgiving
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-        dilated_motion = cv2.dilate(motion_mask, kernel)
-        
-        # Include skin regions near motion
-        skin_near_motion = cv2.bitwise_and(skin_mask, dilated_motion)
-        
-        # Add persistence for previously detected hand regions
-        if self.last_hand_regions and self.hand_persistence_frames < self.max_persistence_frames:
-            persistence_mask = np.zeros_like(skin_mask)
-            for region in self.last_hand_regions:
-                x, y, w, h = region
-                # Expand the region slightly
-                x = max(0, x - 20)
-                y = max(0, y - 20)
-                w = min(skin_mask.shape[1] - x, w + 40)
-                h = min(skin_mask.shape[0] - y, h + 40)
-                persistence_mask[y:y+h, x:x+w] = 255
-            
-            # Include skin in persistent regions
-            persistent_skin = cv2.bitwise_and(skin_mask, persistence_mask)
-            combined = cv2.bitwise_or(combined, persistent_skin)
-        
-        # Combine all approaches
-        result = cv2.bitwise_or(combined, skin_near_motion)
-        
-        return result
-    
-    def filter_hand_contours(self, contours: List[np.ndarray], 
-                           motion_mask: np.ndarray) -> List[np.ndarray]:
-        """
-        Filter contours to keep only hand-like moving regions.
-        
-        Args:
-            contours: List of skin contours
-            motion_mask: Motion detection mask
-            
-        Returns:
-            Filtered list of hand contours
-        """
-        valid_contours = []
-        
+        valid_hands = []
         for contour in contours:
             area = cv2.contourArea(contour)
-            
-            # Basic area filtering
-            if area < self.min_area or area > self.max_area:
-                continue
-            
-            # Check if contour has significant motion
-            mask = np.zeros(motion_mask.shape, dtype=np.uint8)
-            cv2.fillPoly(mask, [contour], 255)
-            
-            # Count motion pixels in this region
-            motion_in_region = cv2.bitwise_and(motion_mask, mask)
-            motion_pixels = np.sum(motion_in_region > 0)
-            
-            # Require minimum motion
-            if motion_pixels < self.min_motion_area:
-                continue
-            
-            # Simple shape filtering
-            x, y, w, h = cv2.boundingRect(contour)
-            aspect_ratio = float(w) / h
-            
-            # Hands are not extremely thin or wide
-            if aspect_ratio < 0.2 or aspect_ratio > 5.0:
-                continue
-            
-            # Check if region is reasonably compact
-            hull = cv2.convexHull(contour)
-            hull_area = cv2.contourArea(hull)
-            if hull_area > 0:
-                solidity = area / hull_area
-                if solidity < 0.4:  # Very loose requirement
-                    continue
-            
-            valid_contours.append(contour)
-        
-        # Sort by area (larger first, but we've already limited max size)
-        valid_contours.sort(key=cv2.contourArea, reverse=True)
-        
-        return valid_contours
-    
-    def detect_hands_simple(self, frame: np.ndarray, 
-                           max_hands: int = 1,
-                           use_motion: bool = True) -> List[Tuple[int, int, int, int]]:
-        """
-        Simple hand detection combining skin and motion with persistence.
-        
-        Args:
-            frame: BGR input frame
-            max_hands: Maximum number of hands to detect
-            use_motion: Whether to use motion filtering
-            
-        Returns:
-            List of (x, y, w, h) bounding boxes
-        """
-        # Get skin mask
-        skin_mask = self.detect_skin_mask(frame)
-        
-        if use_motion:
-            # Get motion mask
-            motion_mask = self.detect_motion_mask(frame)
-            
-            # Combine skin and motion with persistence
-            combined_mask = self.combine_skin_and_motion(skin_mask, motion_mask)
-        else:
-            combined_mask = skin_mask
-            motion_mask = np.ones_like(skin_mask) * 255  # All motion if disabled
-        
-        # Find contours
-        contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, 
-                                      cv2.CHAIN_APPROX_SIMPLE)
-        
-        # Filter contours
-        if use_motion:
-            valid_contours = self.filter_hand_contours(contours, motion_mask)
-        else:
-            # Fallback to basic filtering
-            valid_contours = self.find_hand_contours(combined_mask, min_area=self.min_area)
-        
-        # Convert to bounding boxes
-        hands = []
-        for contour in valid_contours[:max_hands]:
-            bbox = self.get_hand_bbox(contour, padding=10)
-            hands.append(bbox)
-        
-        # Update hand persistence tracking
-        if hands:
-            # Found hands - reset persistence counter and update regions
-            self.hand_persistence_frames = 0
-            self.last_hand_regions = hands.copy()
-        else:
-            # No hands found - increment persistence counter
-            self.hand_persistence_frames += 1
-            
-            # If within persistence window, try to detect in last known regions
-            if (self.last_hand_regions and 
-                self.hand_persistence_frames < self.max_persistence_frames):
+            # Use a slightly more forgiving min_area since the mask is cleaner
+            if self.min_area * 0.5 < area < self.max_area:
+                bbox = cv2.boundingRect(contour)
+                confidence = self._calculate_confidence(contour, frame.shape[:2])
                 
-                # Check for skin in last known hand regions
-                for region in self.last_hand_regions:
-                    x, y, w, h = region
-                    # Expand region slightly for tolerance
-                    x = max(0, x - 10)
-                    y = max(0, y - 10)
-                    w = min(skin_mask.shape[1] - x, w + 20)
-                    h = min(skin_mask.shape[0] - y, h + 20)
-                    
-                    # Check if there's still skin in this region
-                    region_mask = skin_mask[y:y+h, x:x+w]
-                    skin_pixels = np.sum(region_mask > 0)
-                    
-                    if skin_pixels > self.min_area // 4:  # Quarter of minimum area
-                        hands.append((x, y, w, h))
-                        break  # Only need one persistent hand
+                valid_hands.append({
+                    'bbox': bbox,
+                    'confidence': confidence
+                })
         
-        return hands
+        # Sort by confidence and return the top N hands
+        valid_hands.sort(key=lambda h: h['confidence'], reverse=True)
+        
+        return valid_hands[:max_hands]
     
-    def visualize_simple_detection(self, frame: np.ndarray, 
-                                  show_motion: bool = False,
-                                  show_skin: bool = False) -> np.ndarray:
+    def reset(self):
+        """Resets the detector's state, including the background model."""
+        self.bg_remover.reset()
+        logger.info("SimpleHandDetector reset.")
+    
+    def detect_skin_mask(self, frame: np.ndarray) -> np.ndarray:
         """
-        Visualize simple detection with optional mask overlays.
+        Detects the skin mask from the frame.
         
         Args:
-            frame: Input frame
-            show_motion: Whether to show motion mask
-            show_skin: Whether to show skin mask
+            frame: BGR input frame.
             
         Returns:
-            Visualization frame
+            A binary mask where skin pixels are white and non-skin pixels are black.
         """
-        result = frame.copy()
+        # Convert the frame to HSV color space
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         
-        # Detect hands
-        hands = self.detect_hands_simple(frame)
+        # Define the range of skin color in HSV
+        lower = np.array([0, 40, 80])
+        upper = np.array([20, 255, 255])
         
-        # Draw hand detections
-        for i, (x, y, w, h) in enumerate(hands):
-            # Draw main bounding box
-            cv2.rectangle(result, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            
-            # Add label
-            label = f"Hand {i+1}"
-            cv2.putText(result, label, (x, y - 10), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        # Threshold the HSV image to get only skin colors
+        mask = cv2.inRange(hsv, lower, upper)
         
-        # Optional mask overlays
-        if show_motion:
-            motion_mask = self.detect_motion_mask(frame)
-            motion_colored = cv2.applyColorMap(motion_mask, cv2.COLORMAP_JET)
-            result = cv2.addWeighted(result, 0.7, motion_colored, 0.3, 0)
-        
-        if show_skin:
-            skin_mask = self.detect_skin_mask(frame)
-            skin_colored = cv2.applyColorMap(skin_mask, cv2.COLORMAP_SPRING)
-            result = cv2.addWeighted(result, 0.7, skin_colored, 0.3, 0)
-        
-        # Add info text with persistence info
-        persistence_info = f"Persist: {self.hand_persistence_frames}/{self.max_persistence_frames}"
-        info_text = f"Hands: {len(hands)} | Motion: ON | {persistence_info}"
-        cv2.putText(result, info_text, (10, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        
-        # Draw persistence regions if active
-        if (self.last_hand_regions and 
-            self.hand_persistence_frames > 0 and 
-            self.hand_persistence_frames < self.max_persistence_frames):
-            for region in self.last_hand_regions:
-                x, y, w, h = region
-                cv2.rectangle(result, (x, y), (x + w, y + h), (255, 255, 0), 1)  # Yellow for persistence
-                cv2.putText(result, "PERSIST", (x, y - 5), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
-        
-        return result
-    
-    def reset_motion_detection(self):
-        """Reset motion detection background model and persistence."""
-        self.background_subtractor = cv2.createBackgroundSubtractorMOG2(
-            detectShadows=False, varThreshold=30, history=500)
-        self.prev_gray = None
-        self.last_hand_regions = []
-        self.hand_persistence_frames = 0
-        print("Motion detection and hand persistence reset")
-    
-    # Override parent method
-    def detect_hands(self, img_bgr: np.ndarray, max_hands: int = 1) -> List[Tuple[int, int, int, int]]:
-        """Override parent method to use simple motion-based detection."""
-        return self.detect_hands_simple(img_bgr, max_hands, use_motion=True) 
+        return mask 
