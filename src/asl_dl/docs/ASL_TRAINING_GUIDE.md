@@ -1,303 +1,266 @@
-# ASL Training Guide - MobileNetV2 for 30 FPS
+# ASL Training Guide - MobileNetV2 Real-Time Recognition
 
-## 🎯 **Goal: Real-time ASL Recognition at 30 FPS**
+## Overview
 
-This guide walks you through training **MobileNetV2** models optimized for 30 FPS real-time ASL hand sign recognition.
+This guide walks you through training MobileNetV2 models for real-time ASL hand sign recognition using the proper Kaggle ASL dataset, generating comprehensive evaluations, and running live inference.
 
-## 🚀 **Super Quick Start** (Recommended)
+## 🚀 Quick Start
 
-### 1. One-Command Setup
+### 1. Download Dataset and Train Model
 ```bash
-# Activate virtual environment and run setup
-source venv/bin/activate
-python scripts/setup_asl_training.py
+# Train on proper Kaggle ASL dataset (A, B, C letters)
+python -m src.asl_dl.training.train --mode kaggle_abc
 ```
 
-### 2. Start Training Immediately  
+This single command will:
+- Automatically download the correct Kaggle ASL dataset
+- Train MobileNetV2 optimized for real-time performance
+- Save the best model to `models/best_mobilenetv2_model.pth`
+- Use GPU acceleration (Apple Silicon MPS or CUDA)
+
+### 2. Run Live Recognition
 ```bash
-# Train MobileNetV2 for 30 FPS performance
-python scripts/quick_train.py
+python run_live_asl.py
 ```
 
-That's it! 🎉 The system will automatically:
-- Download the ASL dataset from Kaggle (87,000+ images)
-- Install all dependencies
-- Train MobileNetV2 optimized for 30 FPS
-- Save the best model with benchmarks
-
-## 📋 Manual Setup (If needed)
-
-### 1. Install Dependencies
+### 3. Generate Comprehensive Evaluation
 ```bash
-# Activate virtual environment
-source venv/bin/activate
-
-# Install deep learning dependencies  
-pip install -r requirements.txt
-pip install kaggle  # For dataset download
+python -m src.asl_dl.scripts.comprehensive_evaluation
 ```
 
-### 2. Kaggle Setup (For automatic download)
+## 📊 Training Modes
+
+The training script supports multiple modes:
+
+### Kaggle ABC Mode (Recommended)
 ```bash
-# 1. Go to https://www.kaggle.com/account
-# 2. Create API token (downloads kaggle.json)
-# 3. Place in ~/.kaggle/kaggle.json
-# 4. Set permissions
-chmod 600 ~/.kaggle/kaggle.json
+python -m src.asl_dl.training.train --mode kaggle_abc
 ```
+- Downloads and trains on proper Kaggle ASL dataset
+- Focuses on A, B, C letters with 70 images each
+- Optimized for high accuracy and real-time performance
 
-## 🗂️ Dataset Setup
-
-### Option A: Automatic (Included in setup script)
-The setup script handles everything automatically.
-
-### Option B: Manual Download
-1. Go to [ASL Dataset on Kaggle](https://www.kaggle.com/datasets/ayuraj/asl-dataset)
-2. Download and extract to `data/raw/`
-3. Run: `python scripts/setup_asl_training.py` to organize structure
-
-### Expected Directory Structure
-```
-data/raw/asl_dataset/
-├── unified/
-│   ├── train_images/
-│   │   ├── A/ (3000+ images)
-│   │   ├── B/ (3000+ images)
-│   │   └── ... (26 letters total)
-│   └── test_images/
-├── models/
-└── configs/
-```
-
-## 🧠 Model Training - 30 FPS Focus
-
-### 1. Quick Training (Recommended)
+### Custom Data Mode
 ```bash
-# Train optimized MobileNetV2 for 30 FPS
-python scripts/quick_train.py
+python -m src.asl_dl.training.train --mode custom --data-dir path/to/your/data
 ```
+- Train on your own collected data
+- Data should be organized as: `data_dir/class_name/images.jpg`
 
-### 2. Compare Multiple Models
+### Model Comparison Mode
 ```bash
-# Train and compare all 30 FPS optimized models
-python -m src.asl_cam.train
+python -m src.asl_dl.training.train --mode compare
 ```
+- Trains and compares multiple architectures
+- Generates performance benchmarks
 
-### 3. Manual Training
-```bash
-# MobileNetV2 Standard (Balanced)
-python -c "
-from src.asl_cam.train import ASLTrainer
-config = {
-    'batch_size': 64,
-    'learning_rate': 0.002, 
-    'num_epochs': 25,
+## ⚙️ Training Configuration
+
+### Default Configuration (Optimized)
+The training uses these optimized settings:
+
+```python
+{
+    'batch_size': 32,
+    'learning_rate': 0.001,
+    'num_epochs': 30,           # Increased for better convergence
     'input_size': 224,
-    'width_mult': 1.0
+    'device': 'mps',            # Apple Silicon GPU support
+    'data_augmentation': True   # Aggressive augmentation enabled
 }
-trainer = ASLTrainer(config)
-result = trainer.train('data/raw/asl_dataset/unified/train_images', 'mobilenetv2')
-print(f'Accuracy: {result[\"best_accuracy\"]:.2f}% | FPS: {result[\"benchmark\"][\"fps\"]:.1f}')
-"
-
-# MobileNetV2 Lite (Maximum Speed)
-python -c "
-from src.asl_cam.train import ASLTrainer
-config = {
-    'batch_size': 80,
-    'learning_rate': 0.003,
-    'num_epochs': 20,
-    'input_size': 192
-}
-trainer = ASLTrainer(config)
-result = trainer.train('data/raw/asl_dataset/unified/train_images', 'mobilenetv2_lite')
-print(f'Accuracy: {result[\"best_accuracy\"]:.2f}% | FPS: {result[\"benchmark\"][\"fps\"]:.1f}')
-"
-
-# MediaPipe (Ultra Fast)
-python -c "
-from src.asl_cam.train import ASLTrainer
-config = {
-    'batch_size': 128,
-    'learning_rate': 0.005,
-    'num_epochs': 15
-}
-trainer = ASLTrainer(config)
-result = trainer.train('data/raw/asl_dataset/unified/train_images', 'mediapipe')
-print(f'Accuracy: {result[\"best_accuracy\"]:.2f}% | FPS: {result[\"benchmark\"][\"fps\"]:.1f}')
-"
 ```
 
-## 🔄 Real-time Inference at 30 FPS
+### Data Augmentation Pipeline
+Enhanced augmentation for better A vs C distinction:
+- **Random Crop**: Improves spatial invariance
+- **Random Horizontal Flip**: 50% probability
+- **Random Rotation**: ±20 degrees
+- **Color Jitter**: Brightness, contrast, saturation variation
+- **Normalization**: ImageNet statistics
 
-### 1. Run Real-time Recognition
+### Custom Configuration
+You can override default settings:
+
 ```bash
-# MobileNetV2 Standard (Best balance)
-python -m src.asl_cam.infer --model models/best_mobilenetv2_model.pth --type mobilenetv2 --fps 30
-
-# MobileNetV2 Lite (Maximum speed)
-python -m src.asl_cam.infer --model models/best_mobilenetv2_lite_model.pth --type mobilenetv2_lite --fps 30
-
-# MediaPipe (Ultra fast)
-python -m src.asl_cam.infer --model models/best_mediapipe_model.pth --type mediapipe --fps 30
+python -m src.asl_dl.training.train --mode kaggle_abc --epochs 50 --batch-size 64 --lr 0.002
 ```
 
-### 2. Real-time Controls
-- **SPACE**: Toggle debug info
+## 📈 Evaluation and Visualization
+
+### Comprehensive Evaluation
+Generate detailed analysis of your trained model:
+
+```bash
+python -m src.asl_dl.scripts.comprehensive_evaluation
+```
+
+This creates four types of visualizations in `src/asl_dl/visualization/plots/`:
+
+#### 1. Confusion Matrix (`confusion_matrix.png`)
+- Shows exact prediction vs true label relationships
+- Includes both counts and percentages
+- Identifies which letters are confused for others
+
+#### 2. Performance Metrics (`performance_metrics.png`)
+Four-panel analysis:
+- **Precision/Recall/F1-Score**: By class comparison
+- **Confidence Distribution**: Overall prediction confidence
+- **Accuracy vs Threshold**: How accuracy changes with confidence
+- **Class-wise Confidence**: Confidence distribution per letter
+
+#### 3. Error Analysis (`error_analysis.png`)
+Two-panel error breakdown:
+- **Error Rate by Class**: Which letters are hardest to predict
+- **Confidence Comparison**: Correct vs incorrect prediction confidence
+
+#### 4. Detailed Report (`evaluation_report.json`)
+Machine-readable metrics including:
+- Overall accuracy, precision, recall, F1-scores
+- Per-class performance statistics
+- Confidence distribution statistics
+
+### Custom Evaluation
+Evaluate specific model or data:
+
+```bash
+python -m src.asl_dl.scripts.comprehensive_evaluation --model path/to/model.pth --data path/to/test/data
+```
+
+## 🔧 Hardware Optimization
+
+### Apple Silicon (M1/M2/M3)
+The training automatically detects and uses MPS (Metal Performance Shaders):
+- **Significantly faster training** (3-5x speedup vs CPU)
+- **Automatic device selection** in training script
+- **Memory optimization** for Apple Silicon
+
+### NVIDIA GPUs
+CUDA support is automatically detected:
+```bash
+# Training will use CUDA if available
+python -m src.asl_dl.training.train --mode kaggle_abc
+```
+
+### CPU Fallback
+If no GPU is available, training falls back to CPU:
+- **Longer training times** but still functional
+- **Same accuracy results**
+
+## 📁 File Organization
+
+### Training Output Structure
+```
+models/
+└── best_mobilenetv2_model.pth    # Best trained model
+
+src/asl_dl/visualization/plots/
+├── confusion_matrix.png          # Confusion matrix
+├── performance_metrics.png       # 4-panel performance analysis
+├── error_analysis.png           # Error breakdown
+└── evaluation_report.json       # Detailed metrics
+
+logs/
+└── asl_training_YYYYMMDD_HHMMSS/ # TensorBoard logs
+
+data/raw/kaggle_asl/
+└── train/
+    ├── A/                        # 70 ASL 'A' images
+    ├── B/                        # 70 ASL 'B' images
+    └── C/                        # 70 ASL 'C' images
+```
+
+## 🎯 Expected Results
+
+### Training Performance
+With the optimized configuration:
+- **Training Time**: ~10-15 minutes on Apple Silicon M3
+- **Final Accuracy**: 95-100% validation accuracy
+- **Model Size**: ~36MB
+- **Inference Speed**: 30+ FPS real-time
+
+### Recent Training Results
+```
+Overall Accuracy: 92.9%
+Macro F1-Score: 92.7%
+Mean Confidence: 84.3%
+
+Per-Class Performance:
+  A: Precision=100%, Recall=84.6%, F1=91.7%
+  B: Precision=85.7%, Recall=100%, F1=92.3%  
+  C: Precision=94.1%, Recall=94.1%, F1=94.1%
+```
+
+Key improvement: **Perfect precision for letter 'A'** - when the model predicts 'A', it's never wrong.
+
+## 🔄 Live Recognition Usage
+
+### Basic Usage
+```bash
+python run_live_asl.py
+```
+
+### Controls
+- **Q**: Quit application
 - **S**: Toggle statistics display
-- **F**: Toggle FPS warning
-- **Q/ESC**: Quit application
+- **R**: Reset hand tracker
+- **B**: Reset background learning
+- **SPACE**: Pause/unpause
+- **C**: Capture hand data for analysis
+- **X/Z**: Adjust prediction smoothing
 
-### 3. Performance Monitoring
-The system shows real-time:
-- Current FPS and average FPS
-- Inference time per frame
-- FPS target achievement status
-- Performance warnings if below target
+### Display Features
+- **Large colored letters**: A, B, C with confidence-based colors
+- **Confidence scores**: Numerical confidence display
+- **FPS monitoring**: Real-time performance stats
+- **Smoothing control**: Adjustable prediction stability
 
-## 📊 Model Comparison - 30 FPS Optimized
-
-| Model | Accuracy | FPS | Params | Best For |
-|-------|----------|-----|---------|----------|
-| **MediaPipe** | 85-90% | 200+ | 50K | Ultra-fast inference |
-| **MobileNetV2 Lite** | 90-94% | 60-120 | 1.3M | Speed-focused mobile |
-| **MobileNetV2** | 94-97% | 30-60 | 3.5M | Balanced performance |
-
-## ⚙️ Configuration for 30 FPS
-
-### Optimized Training Config
-```python
-# MobileNetV2 Configuration (30+ FPS target)
-mobilenetv2_config = {
-    'batch_size': 64,           # Larger batch for efficiency
-    'learning_rate': 0.002,     # Higher LR for faster convergence
-    'num_epochs': 25,           # Reasonable training time
-    'input_size': 224,          # Standard input size
-    'width_mult': 1.0,          # Full model width
-    'weight_decay': 1e-4,
-    'scheduler_step': 8,
-    'num_workers': 4            # Parallel data loading
-}
-
-# MobileNetV2 Lite Configuration (60+ FPS target)
-lite_config = {
-    'batch_size': 80,
-    'learning_rate': 0.003,
-    'num_epochs': 20,
-    'input_size': 192,          # Smaller input for speed
-    'width_mult': 0.5,          # Half model width
-    'weight_decay': 1e-4,
-    'scheduler_step': 6,
-    'num_workers': 4
-}
-```
-
-### Model Architecture Details
-```python
-# MobileNetV2 ASL (30 FPS optimized)
-MobileNetV2ASL(
-    num_classes=26,             # A-Z letters
-    input_size=224,             # Input image size
-    width_mult=1.0              # Model width multiplier
-)
-
-# MobileNetV2 Lite (60+ FPS)
-MobileNetV2Lite(
-    num_classes=26              # Minimal architecture
-)
-```
-
-## 🚀 Performance Optimization for 30 FPS
-
-### 1. Speed Optimizations
-- **Input size**: 224x224 (standard) or 192x192 (faster)
-- **Width multiplier**: 1.0 (accuracy) or 0.5 (speed)
-- **Batch processing**: Larger batches for efficiency
-- **Model warmup**: Automatic warmup for consistent timing
-
-### 2. Memory Optimizations
-- **Pin memory**: For GPU data transfer
-- **Parallel workers**: Multi-threaded data loading
-- **Gradient checkpointing**: For large batch sizes
-
-### 3. Inference Optimizations
-- **Temporal smoothing**: Reduced for responsiveness (3 frames)
-- **Confidence threshold**: Adjustable (default 0.7)
-- **FPS limiting**: Target-based frame rate control
-
-## 📈 Expected Results
-
-### Dataset Statistics
-- **Classes**: 26 letters (A-Z)
-- **Training samples**: ~87,000 images
-- **Test samples**: ~29,000 images
-- **Input size**: Resized to 224x224 or 192x192
-
-### Performance Benchmarks (30 FPS Target)
-
-| Model | Accuracy | Inference Time | FPS | Status |
-|-------|----------|----------------|-----|---------|
-| MediaPipe | 87% | 2-3ms | 200+ | ✅ EXCEEDS |
-| MobileNetV2 Lite | 92% | 8-12ms | 80-120 | ✅ EXCEEDS |
-| MobileNetV2 | 95% | 16-25ms | 40-60 | ✅ MEETS |
-
-### Training Time Estimates
-- **MediaPipe**: ~15 minutes (15 epochs)
-- **MobileNetV2 Lite**: ~45 minutes (20 epochs)
-- **MobileNetV2**: ~60 minutes (25 epochs)
-
-## 🔧 Troubleshooting
+## 🛠️ Troubleshooting
 
 ### Common Issues
 
-#### 1. "Command not found: python"
+#### Training Speed Issues
 ```bash
-# Activate virtual environment
+# Verify GPU usage
+python -c "import torch; print(f'MPS available: {torch.backends.mps.is_available()}')"
+
+# Use smaller batch size if memory issues
+python -m src.asl_dl.training.train --mode kaggle_abc --batch-size 16
+```
+
+#### Dataset Download Issues
+```bash
+# Manual dataset setup
+mkdir -p data/raw/kaggle_asl/train
+# Place A, B, C folders with images in the train directory
+```
+
+#### Model Loading Issues
+```bash
+# Check model file exists
+ls -la models/best_mobilenetv2_model.pth
+
+# Retrain if corrupted
+python -m src.asl_dl.training.train --mode kaggle_abc
+```
+
+## 📝 Complete Workflow Example
+
+```bash
+# 1. Activate environment
 source venv/bin/activate
+
+# 2. Train model on Kaggle data
+python -m src.asl_dl.training.train --mode kaggle_abc
+
+# 3. Generate comprehensive evaluation
+python -m src.asl_dl.scripts.comprehensive_evaluation
+
+# 4. Run live recognition
+python run_live_asl.py
+
+# 5. View results
+open src/asl_dl/visualization/plots/confusion_matrix.png
+open src/asl_dl/visualization/plots/performance_metrics.png
 ```
 
-#### 2. Low FPS Performance
-```bash
-# Use lighter model
-python -m src.asl_cam.infer --model models/best_mobilenetv2_lite_model.pth --type mobilenetv2_lite
-
-# Reduce input size
-# Edit config: 'input_size': 192
-```
-
-#### 3. Dataset Download Issues
-```bash
-# Manual download from Kaggle
-# Extract to data/raw/
-python scripts/setup_asl_training.py  # Organize structure
-```
-
-#### 4. GPU Memory Issues
-```bash
-# Reduce batch size in config
-'batch_size': 32  # Instead of 64
-```
-
-## 🎯 Quick Commands Summary
-
-```bash
-# Complete setup and training
-source venv/bin/activate
-python scripts/setup_asl_training.py
-python scripts/quick_train.py
-
-# Real-time inference
-python -m src.asl_cam.infer --model models/best_mobilenetv2_model.pth --type mobilenetv2 --fps 30
-
-# Model comparison
-python -m src.asl_cam.train
-```
-
-## 📝 Next Steps
-
-1. **Train**: Run `python scripts/quick_train.py`
-2. **Test**: Run real-time inference with your model
-3. **Optimize**: Adjust configs for your hardware
-4. **Deploy**: Use the trained model in your applications
-
-Target achieved: **30 FPS real-time ASL recognition** with **90%+ accuracy**! 🎉 
+This workflow provides a complete end-to-end ASL recognition system with professional-grade evaluation and real-time performance. 

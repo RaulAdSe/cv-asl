@@ -92,7 +92,6 @@ class LiveASLRecognizer:
         # Performance optimization settings
         self.frame_skip_counter = 0
         self.frame_skip_rate = 1  # Process every N frames (1 = no skip, 2 = skip every other)
-        self.target_fps = 25      # Increased target FPS
         self.last_process_time = 0
         
         # --- State for paused display ---
@@ -992,29 +991,18 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
             # State is updated, UI will be drawn in the main loop
             return
 
-        # --- Performance optimization: Adaptive frame skipping ---
-        # Skip frames if we're processing too slowly
-        frame_interval = current_time - self.last_process_time
-        min_frame_time = 1.0 / self.target_fps
-        
-        # Increment frame skip counter
+        # --- Performance Throttling ---
+        # Frame skipping for performance is now the primary method
         self.frame_skip_counter += 1
-        
-        # Skip frames based on performance
-        if frame_interval < min_frame_time or self.frame_skip_counter % self.frame_skip_rate != 0:
-            # Just update FPS tracker and store frame for UI
-            self.fps_tracker.update()
-            self.last_capture_frame = frame.copy()
+        if self.frame_skip_counter % self.frame_skip_rate != 0:
             return
-        
-        self.last_process_time = current_time
 
+        # --- Hand Detection ---
+        processed_hand, hand_info = self.hand_detector.detect_and_process_hand(frame, target_size=224)
+        self.last_hand_info = hand_info
+        
         # --- Normal Processing ---
         self.fps_tracker.update()
-        
-        processed_hand, hand_info = self.hand_detector.detect_and_process_hand(
-            frame, 224  # Use fixed size since model.INPUT_SIZE might not exist
-        )
         
         prediction, confidence = None, 0.0
         if processed_hand is not None:
@@ -1074,75 +1062,52 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
         # Draw BIG centered prediction
         h, w = frame.shape[:2]
         
-        # Only show the letter with beautiful colors
-        if prediction != "Show Hand" and confidence > self.min_pred_confidence:
+        # --- Big, colored prediction letter ---
+        if prediction and confidence > self.min_pred_confidence and prediction != "Show Hand":
             letter_text = prediction
-            if confidence > 0.8:
-                color = (0, 255, 0)    # Bright green for very confident
-            elif confidence > 0.6:
-                color = (0, 255, 180)  # Green-cyan for confident
+            if confidence > 0.9:
+                color = (0, 255, 0)      # Bright Green for very high confidence
+            elif confidence > 0.75:
+                color = (0, 255, 180)    # Green-cyan for high confidence
             else:
-                color = (0, 200, 255)  # Light blue for moderately confident
+                color = (0, 200, 255)    # Orange-yellow for medium confidence
         else:
-            letter_text = "?" if prediction == "Show Hand" else prediction
-            color = (100, 200, 255)  # Soft blue for uncertain/no prediction
+            letter_text = "?"
+            color = (100, 200, 255)      # Soft blue for uncertain
         
-        # Calculate text size for upper positioning
-        font_scale = 5  # About 35% of previous size (was 15)
-        thickness = 8   # Proportionally smaller thickness
-        (text_width, text_height), baseline = cv2.getTextSize(letter_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+        # Draw the large letter
+        letter_font_scale = 12.0 # Very large scale for the letter
+        letter_thickness = 15
+        (lw, lh), l_baseline = cv2.getTextSize(letter_text, cv2.FONT_HERSHEY_SIMPLEX, letter_font_scale, letter_thickness)
+        letter_x = (w - lw) // 2
+        letter_y = lh + 100 # Position it high
         
-        # Position at very top of screen (same height as instruction text)
-        text_x = (w - text_width) // 2
-        text_y = 80 + text_height  # Same level as instruction text, just below it
-        
-        # Draw text with elegant outline for better visibility (no background rectangle)
-        outline_thickness = thickness + 4  # Thicker outline
-        
-        # Draw black outline first for contrast
-        cv2.putText(frame, letter_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 
-                   font_scale, (0, 0, 0), outline_thickness)
-        
-        # Draw the main letter text on top
-        cv2.putText(frame, letter_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 
-                   font_scale, color, thickness)
-        
-        # Small confidence text below the letter with matching style
-        if prediction != "Show Hand":
+        cv2.putText(frame, letter_text, (letter_x, letter_y), cv2.FONT_HERSHEY_SIMPLEX, letter_font_scale, (0,0,0), letter_thickness + 5)
+        cv2.putText(frame, letter_text, (letter_x, letter_y), cv2.FONT_HERSHEY_SIMPLEX, letter_font_scale, color, letter_thickness)
+
+        # --- Large confidence number below the letter ---
+        if prediction and confidence > self.min_pred_confidence and prediction != "Show Hand":
             conf_text = f"{confidence:.2f}"
-            small_font_scale = 1.0  # Even smaller to keep it compact
-            small_thickness = 2
-            small_outline_thickness = small_thickness + 2
-            (conf_width, conf_height), _ = cv2.getTextSize(conf_text, cv2.FONT_HERSHEY_SIMPLEX, small_font_scale, small_thickness)
-            conf_x = (w - conf_width) // 2
-            conf_y = text_y + 30  # Keep it very close and compact
+            conf_font_scale = 3.0 # Large, but smaller than the letter
+            conf_thickness = 4
+            (cw, ch), c_baseline = cv2.getTextSize(conf_text, cv2.FONT_HERSHEY_SIMPLEX, conf_font_scale, conf_thickness)
+            conf_x = (w - cw) // 2
+            conf_y = letter_y + ch + 40 # Position below the letter
             
-            # Draw outline first
-            cv2.putText(frame, conf_text, (conf_x, conf_y), cv2.FONT_HERSHEY_SIMPLEX, 
-                       small_font_scale, (0, 0, 0), small_outline_thickness)
-            # Draw main confidence text
-            cv2.putText(frame, conf_text, (conf_x, conf_y), cv2.FONT_HERSHEY_SIMPLEX, 
-                       small_font_scale, (255, 255, 255), small_thickness)
-        
-        # Draw FPS and performance stats (moved to bottom-left to avoid interfering with big prediction)
+            cv2.putText(frame, conf_text, (conf_x, conf_y), cv2.FONT_HERSHEY_SIMPLEX, conf_font_scale, (0,0,0), conf_thickness + 4)
+            cv2.putText(frame, conf_text, (conf_x, conf_y), cv2.FONT_HERSHEY_SIMPLEX, conf_font_scale, (255,255,255), conf_thickness)
+
+        # Draw FPS and performance stats (moved to bottom-left)
         if self.show_stats:
             fps = self.fps_tracker.get_fps()
-            stats_y_start = h - 150  # Start from bottom (more space for smoothing info)
-            
+            stats_y_start = h - 150
+
             cv2.putText(frame, f"FPS: {fps:.1f}", (10, stats_y_start), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            
-            # Show frame skip rate for performance monitoring
-            cv2.putText(frame, f"Skip Rate: 1/{self.frame_skip_rate}", (10, stats_y_start + 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-            
-            # Show target FPS
-            cv2.putText(frame, f"Target: {self.target_fps} FPS", (10, stats_y_start + 60), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-            
-            # Show prediction smoothing status
+
+            # Show prediction smoothing status, moved up to replace skip rate
             cv2.putText(frame, f"Smoothing: {self.min_consensus}/{self.buffer_size}", 
-                       (10, stats_y_start + 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-            
+                       (10, stats_y_start + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+
         # --- PAUSED indicator ---
         if self.paused:
             h, w = frame.shape[:2]
@@ -1207,12 +1172,10 @@ Training Match: {'Good' if black_percentage > 50 else 'Poor'}
             # Toggle performance mode
             if self.frame_skip_rate == 1:
                 self.frame_skip_rate = 2
-                self.target_fps = 30
-                logger.info("🚀 Performance mode: ON (Skip every 2nd frame, target 30 FPS)")
+                logger.info("🚀 Performance mode: ON (Skip every 2nd frame)")
             else:
                 self.frame_skip_rate = 1
-                self.target_fps = 25
-                logger.info("🎯 Quality mode: ON (Process all frames, target 25 FPS)")
+                logger.info("🎯 Quality mode: ON (Process all frames)")
         elif key == ord('m'):
             # Model performance evaluation
             if (self.last_processed_hand is not None and 

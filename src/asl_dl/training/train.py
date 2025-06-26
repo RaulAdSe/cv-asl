@@ -695,8 +695,8 @@ def main():
         # Verify dataset
         if not Path(data_dir).exists():
             logger.error(f"❌ Kaggle ABC dataset not found at {data_dir} for comparison. Please run the download.")
-            return
-            
+        return
+    
         compare_models(data_dir, config)
 
 if __name__ == "__main__":

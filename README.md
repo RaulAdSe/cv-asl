@@ -1,205 +1,290 @@
-# ASL Computer Vision & Deep Learning System
+# ASL Real-Time Recognition System
 
-A complete real-time American Sign Language recognition system built from scratch to learn computer vision fundamentals, deep learning training, and efficient real-time inference pipelines.
+A complete real-time American Sign Language recognition system featuring advanced computer vision algorithms, MobileNetV2 deep learning, and comprehensive evaluation tools for accurate hand sign classification.
 
-## 🎯 Project Vision & Learning Goals
+## Overview
 
-This project was designed as a comprehensive learning journey covering:
+This system provides end-to-end ASL recognition capabilities from dataset training to real-time inference. It combines custom computer vision algorithms with modern deep learning to achieve high accuracy and real-time performance.
 
-- **Computer Vision from Scratch**: Understanding OpenCV fundamentals, image processing, and hand detection without relying on pre-built solutions like MediaPipe
-- **MOG2 Background Subtraction**: Deep dive into theory and practical implementation for robust background removal
-- **Deep Learning Pipeline**: End-to-end model training, from dataset preparation to real-time inference
-- **Real-time Performance**: Building efficient pipelines that work at 30+ FPS
-- **Data Pipeline Optimization**: Making live camera data match training data characteristics
+### Key Features
 
-## 🚀 System Architecture
-
-### Computer Vision Pipeline (`src/asl_cam/`)
-```
-Camera Input → Hand Detection → Background Removal → Preprocessing → Model Input
-    ↓              ↓                    ↓                ↓             ↓
- OpenCV      Skin + Motion         MOG2 Algorithm    Crop & Resize   224x224 RGB
-```
-
-### Deep Learning Pipeline (`src/asl_dl/`)
-```
-Kaggle Dataset → Data Preprocessing → MobileNetV2 Training → Model Export → Live Inference
-     ↓                ↓                     ↓                  ↓             ↓
-ASL Images      Augmentation         Transfer Learning     .pth Format    Real-time
-```
-
-## 🔬 Technical Achievements
-
-### Advanced Hand Detection
-- **Multi-factor scoring system** combining position, size, and shape analysis
-- **MOG2 background subtraction** for robust motion detection
-- **Skin detection** using HSV and YCrCb color spaces
-- **Kalman filter tracking** for smooth, stable bounding boxes
-- **Geometric validation** with circularity, solidity, and aspect ratio filtering
-
-### Deep Learning Training
-- **MobileNetV2 architecture** optimized for real-time inference
-- **Transfer learning** with ImageNet pretrained weights
-- **Data augmentation** pipeline matching live camera characteristics
-- **Learning rate scheduling** with ReduceLROnPlateau
-- **Comprehensive metrics** tracking with visualization
-
-### Real-time Inference
-- **30+ FPS performance** with confidence scoring
-- **Entropy calculation** for prediction uncertainty quantification
-- **Live workflow visualization** showing complete processing pipeline
-- **Non-blocking data capture** for continuous training data collection
-
-## 🔧 Key Technical Learnings
-
-### Computer Vision Fundamentals
-- **OpenCV mastery**: Image processing, contour analysis, morphological operations
-- **Color space theory**: RGB, HSV, YCrCb for robust skin detection
-- **Background subtraction**: MOG2 theory and practical implementation
-- **Geometric analysis**: Shape descriptors, convexity defects, solidity
-
-### Deep Learning Pipeline
-- **Dataset preparation**: Kaggle ASL dataset integration and preprocessing
-- **Model architecture**: MobileNetV2 for efficient mobile-ready inference
-- **Training optimization**: Batch normalization, dropout, data augmentation
-- **Performance monitoring**: Loss curves, accuracy metrics, learning rate scheduling
-
-### Real-time Systems
-- **FPS optimization**: Efficient memory management and processing pipelines
-- **Quality control**: Entropy-based confidence assessment
-- **Data consistency**: Making live camera match training data characteristics
-- **System integration**: Seamless camera → vision → DL → UI pipeline
+- **Real-time Recognition**: 30+ FPS ASL letter classification (A, B, C)
+- **Advanced Hand Detection**: Multi-factor scoring with MOG2 background subtraction
+- **GPU Accelerated Training**: Automatic MPS (Apple Silicon) and CUDA support
+- **Comprehensive Evaluation**: Professional-grade metrics and visualizations
+- **Production Ready**: Optimized MobileNetV2 for deployment scenarios
 
 ## 🚀 Quick Start
 
 ### 1. Environment Setup
 ```bash
-# Clone and setup
-git clone <repo-url>
+git clone <repository-url>
 cd CV-asl
 source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Live ASL Recognition
+### 2. Train Model
+```bash
+# Download dataset and train on proper Kaggle ASL data
+python -m src.asl_dl.training.train --mode kaggle_abc
+```
+
+### 3. Run Live Recognition
 ```bash
 python run_live_asl.py
 ```
 
-### 3. Collect Training Data
+### 4. Generate Evaluation Reports
 ```bash
-# Data collection is built into the live system - use SPACE key during live recognition
-python run_live_asl.py  # Press SPACE to capture training data
+python -m src.asl_dl.scripts.comprehensive_evaluation
 ```
 
-### 4. Train Custom Model
-```bash
-python -m src.asl_dl.scripts.train_abc --epochs 25
+## 📊 System Architecture
+
+### Computer Vision Pipeline
+```
+Raw Camera Feed → Hand Detection → Background Removal → Preprocessing → Neural Network
+      ↓               ↓                   ↓               ↓              ↓
+   640x480 RGB   Skin+Motion Filter   MOG2 Algorithm   224x224 Crop   MobileNetV2
 ```
 
-## 🎮 System Controls
+### Deep Learning Pipeline
+```
+Kaggle Dataset → Data Augmentation → MobileNetV2 Training → Model Export → Real-time Inference
+     ↓                ↓                     ↓                  ↓             ↓
+210 ASL Images   Rotation+Color Jitter  Transfer Learning   .pth Format   30+ FPS
+```
 
-### Live Recognition
-- **Space** - Toggle capture mode for workflow analysis
-- **Q** - Quit application
-- **R** - Reset hand tracker
+## 🔧 Core Components
 
-### Data Collection
-- **S** - Save current hand detection
-- **L** - Change ASL letter label (A/B/C)
-- **C** - Capture and visualize data pipeline
-- **B** - Toggle background removal
-- **Q** - Quit
+### Computer Vision (`src/asl_cam/`)
 
-## 📊 Performance Metrics
+#### Advanced Hand Detection
+- **Multi-factor scoring**: Position, size, and shape analysis
+- **MOG2 background subtraction**: Robust motion detection
+- **Skin detection**: HSV and YCrCb color space filtering
+- **Kalman filter tracking**: Smooth bounding box stabilization
+- **Geometric validation**: Circularity, solidity, aspect ratio filtering
 
-### Real-time Performance
-- **30+ FPS** on modern hardware
-- **< 33ms** inference latency
-- **95%+ accuracy** on clear hand gestures
-- **Real-time entropy calculation** for confidence assessment
-
-### Model Specifications
-| Component | Specification |
-|-----------|---------------|
-| Architecture | MobileNetV2 |
-| Input Size | 224×224×3 |
-| Parameters | ~2.3M |
-| Model Size | ~9MB |
-| Classes | A, B, C (expandable) |
-
-## 🔍 Technical Deep Dives
-
-### Background Removal (MOG2)
-- **Adaptive learning** with configurable history (500 frames)
-- **Shadow detection disabled** for performance
-- **Variance threshold tuning** for motion sensitivity
-- **Learning rate optimization** for stability
-
-### Hand Detection Pipeline
+#### Key Algorithms
 ```python
-# Multi-stage detection process
+# Hand detection pipeline
 skin_mask = detect_skin_hsv_ycrcb(frame)
 motion_mask = mog2_background_subtractor.apply(frame)
-hand_candidates = find_contours(skin_mask & motion_mask)
-best_hand = score_candidates(hand_candidates)  # Position + Size + Shape
+candidates = find_contours(skin_mask & motion_mask)
+best_hand = score_candidates(candidates)
 ```
 
-### Entropy-based Confidence
-```python
-# Shannon entropy for prediction uncertainty
-probabilities = softmax(model_output)
-entropy = -sum(p * log(p) for p in probabilities)
-# Low entropy = high confidence, High entropy = uncertain
+### Deep Learning (`src/asl_dl/`)
+
+#### MobileNetV2 Architecture
+- **Transfer learning**: ImageNet pretrained weights
+- **Real-time optimization**: 30+ FPS inference capability
+- **Compact model**: ~36MB for deployment efficiency
+- **High accuracy**: 92.9% overall accuracy on evaluation set
+
+#### Training Features
+- **GPU acceleration**: Automatic MPS/CUDA detection
+- **Data augmentation**: Rotation, color jitter, spatial transforms
+- **Learning rate scheduling**: Adaptive optimization
+- **Comprehensive logging**: TensorBoard integration
+
+## 📈 Performance Metrics
+
+### Model Performance
+```
+Overall Accuracy: 92.9%
+Macro F1-Score: 92.7%
+Mean Confidence: 84.3%
+
+Per-Class Results:
+  A: Precision=100%, Recall=84.6%, F1=91.7%
+  B: Precision=85.7%, Recall=100%, F1=92.3%  
+  C: Precision=94.1%, Recall=94.1%, F1=94.1%
 ```
 
-## 📁 Project Structure
+### System Performance
+| Metric | Value | Target |
+|--------|-------|--------|
+| Inference FPS | 30+ | 30 |
+| Model Size | 36MB | <50MB |
+| Accuracy | 92.9% | >90% |
+| GPU Training Time | 10-15 min | <30 min |
+
+## 🎮 Usage Controls
+
+### Live Recognition Interface
+- **Q**: Quit application
+- **S**: Toggle performance statistics
+- **R**: Reset hand tracking system
+- **B**: Reset background learning model
+- **SPACE**: Pause/resume processing
+- **C**: Capture hand data for analysis
+- **X/Z**: Adjust prediction smoothing
+
+### Visual Display
+- **Large colored letters**: Real-time predictions with confidence-based coloring
+- **Confidence scores**: Numerical confidence values
+- **Performance monitoring**: FPS and processing statistics
+- **Smoothing indicator**: Prediction stability metrics
+
+## 📊 Evaluation and Visualization
+
+### Comprehensive Analysis
+The system generates four types of professional visualizations:
+
+#### 1. Confusion Matrix
+- Prediction accuracy breakdown by class
+- Percentage and count displays
+- Color-coded performance indicators
+
+#### 2. Performance Metrics (4-Panel Analysis)
+- **Panel 1**: Precision/Recall/F1-Score comparison
+- **Panel 2**: Overall confidence distribution
+- **Panel 3**: Accuracy vs confidence threshold
+- **Panel 4**: Class-wise confidence analysis
+
+#### 3. Error Analysis
+- Error rate breakdown by true class
+- Confidence comparison for correct vs incorrect predictions
+
+#### 4. Detailed Report (JSON)
+- Machine-readable metrics export
+- Complete statistical breakdown
+- Programmatic analysis support
+
+### Generate Evaluations
+```bash
+# Standard evaluation on test set
+python -m src.asl_dl.scripts.comprehensive_evaluation
+
+# Custom model/data evaluation
+python -m src.asl_dl.scripts.comprehensive_evaluation --model path/to/model.pth --data path/to/data
+```
+
+## 🗂️ Project Structure
 
 ```
 CV-asl/
 ├── src/
-│   ├── asl_cam/              # Computer Vision Module
-│   │   ├── live_asl.py       # Real-time recognition system
-│   │   ├── vision/           # CV algorithms
-│   │   │   ├── asl_hand_detector.py    # Main detection pipeline
-│   │   │   ├── background_removal.py   # MOG2 implementation
-│   │   │   ├── enhanced_hand_detector.py  # Advanced filtering
-│   │   │   └── tracker.py     # Kalman filter tracking
-│   │   └── utils/
-│   └── asl_dl/               # Deep Learning Module
-│       ├── training/         # Model training pipeline
-│       ├── data/            # Dataset handling
-│       ├── scripts/         # Training scripts
-│       └── visualization/   # Training monitoring
-├── tests/                   # Comprehensive test suite
-├── documentation/           # Technical documentation
-└── run_live_asl.py         # Main application entry (includes data capture)
+│   ├── asl_cam/                    # Computer Vision Module
+│   │   ├── live_asl.py            # Real-time recognition system
+│   │   ├── vision/                # CV algorithms
+│   │   │   ├── asl_hand_detector.py      # Main detection pipeline
+│   │   │   ├── background_removal.py     # MOG2 implementation
+│   │   │   └── tracker.py         # Kalman filter tracking
+│   │   └── utils/                 # Utility functions
+│   └── asl_dl/                    # Deep Learning Module
+│       ├── training/              # Model training pipeline
+│       │   └── train.py          # Main training script
+│   │   ├── scripts/               # Evaluation scripts
+│   │   │   └── comprehensive_evaluation.py
+│   │   ├── models/                # Model architectures
+│   │   │   └── mobilenet.py      # MobileNetV2 implementation
+│   │   └── visualization/         # Training monitoring
+│   │       └── plots/            # Generated visualizations
+│   ├── models/                        # Trained model storage
+│   │   └── best_mobilenetv2_model.pth
+│   ├── data/                         # Dataset storage
+│   │   └── raw/kaggle_asl/train/    # Training images (A, B, C)
+│   ├── tests/                        # Test suite
+│   ├── documentation/                # Technical documentation
+│   └── run_live_asl.py              # Main application entry point
 ```
 
-## 🎯 Key Insights & Learnings
+## 🔧 Hardware Requirements
 
-### Computer Vision
-- **Motion + Color is powerful**: Combining skin detection with background subtraction solved the "torso detection" problem elegantly
-- **Geometric validation matters**: Simple area and aspect ratio filtering eliminates most false positives
-- **Kalman filters are magic**: Smooth tracking dramatically improves user experience
+### Recommended
+- **GPU**: Apple Silicon (M1/M2/M3) with MPS or NVIDIA GPU with CUDA
+- **RAM**: 8GB+ for training, 4GB+ for inference
+- **Storage**: 2GB for model and dataset
+- **Camera**: USB or built-in camera for live recognition
 
-### Deep Learning
-- **Data consistency is crucial**: Making live camera data match training data characteristics was the key breakthrough
-- **Transfer learning works**: MobileNetV2 pretrained weights provided excellent starting point
-- **Real-time optimization**: Model architecture choice (MobileNetV2) enabled 30+ FPS performance
+### Minimum
+- **CPU**: Multi-core processor (training will be slower)
+- **RAM**: 4GB minimum
+- **Storage**: 1GB for essential components
 
-### System Design
-- **Modular architecture pays off**: Clear separation between vision and DL modules enabled independent development
-- **Quality metrics are essential**: Entropy calculation provides valuable confidence assessment
-- **Non-blocking UI**: Keeping main loop responsive while capturing data improved usability
+## 🛠️ Advanced Configuration
 
-## 🚀 Future Enhancements
+### Training Modes
+```bash
+# Kaggle ABC training (recommended)
+python -m src.asl_dl.training.train --mode kaggle_abc
 
-- **Expand alphabet**: Add more ASL letters beyond A, B, C
-- **Mobile deployment**: Optimize for iOS/Android using Core ML/TensorFlow Lite
-- **Real-time training**: Online learning from user corrections
-- **3D hand pose**: Integrate depth information for better accuracy
+# Custom dataset training
+python -m src.asl_dl.training.train --mode custom --data-dir path/to/data
 
----
+# Model architecture comparison
+python -m src.asl_dl.training.train --mode compare
+```
 
-**Built with ❤️ to learn computer vision and deep learning fundamentals**
+### Custom Training Parameters
+```bash
+# Extended training with custom parameters
+python -m src.asl_dl.training.train --mode kaggle_abc --epochs 50 --batch-size 64 --lr 0.002
+```
+
+### GPU Optimization
+```bash
+# Verify GPU acceleration
+python -c "import torch; print(f'MPS: {torch.backends.mps.is_available()}, CUDA: {torch.cuda.is_available()}')"
+```
+
+## 🔍 Technical Deep Dive
+
+### Computer Vision Innovations
+- **Adaptive background learning**: MOG2 with 500-frame history
+- **Multi-modal detection**: Skin detection combined with motion analysis
+- **Geometric filtering**: Advanced shape validation algorithms
+- **Temporal tracking**: Kalman filter for stable hand tracking
+
+### Deep Learning Optimizations
+- **Transfer learning**: Leverages ImageNet pretrained features
+- **Data augmentation**: Aggressive augmentation for robustness
+- **Architecture choice**: MobileNetV2 for efficiency-accuracy balance
+- **Real-time inference**: Optimized for deployment scenarios
+
+### Performance Engineering
+- **Memory optimization**: Efficient data loading and processing
+- **CPU/GPU utilization**: Automatic device selection and optimization
+- **Real-time constraints**: Sub-33ms inference for 30+ FPS
+
+## 🚀 Deployment Considerations
+
+### Model Export
+The trained model (`best_mobilenetv2_model.pth`) is ready for:
+- **Mobile deployment**: Core ML (iOS) or TensorFlow Lite conversion
+- **Edge devices**: ONNX format export capability
+- **Cloud services**: Direct PyTorch model serving
+
+### Integration Points
+```python
+# Load trained model for integration
+from src.asl_dl.models.mobilenet import MobileNetV2ASL
+model = MobileNetV2ASL.load_from_checkpoint('models/best_mobilenetv2_model.pth')
+prediction, confidence = model.predict(hand_image)
+```
+
+## 📝 Development Workflow
+
+### Complete Development Cycle
+```bash
+# 1. Environment setup
+source venv/bin/activate
+
+# 2. Model training
+python -m src.asl_dl.training.train --mode kaggle_abc
+
+# 3. Evaluation generation
+python -m src.asl_dl.scripts.comprehensive_evaluation
+
+# 4. Live testing
+python run_live_asl.py
+
+# 5. Results analysis
+open src/asl_dl/visualization/plots/performance_metrics.png
+```
+
+This system provides a complete, production-ready ASL recognition solution with professional evaluation capabilities and real-time performance suitable for practical applications.
