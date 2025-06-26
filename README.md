@@ -90,6 +90,67 @@ best_hand = score_candidates(candidates)
 - **Learning rate scheduling**: Adaptive optimization
 - **Comprehensive logging**: TensorBoard integration
 
+## 📊 Training Specifications
+
+### Dataset Details
+| Specification | Value |
+|---------------|-------|
+| **Source** | Kaggle ASL Alphabet Dataset |
+| **Classes** | A, B, C (3 letters) |
+| **Total Images** | 210 images (70 per class) |
+| **Train/Val Split** | 168 train / 42 validation (80/20) |
+| **Image Size** | 224×224 pixels (resized) |
+| **Format** | RGB color images |
+
+### Training Configuration
+| Parameter | Value |
+|-----------|-------|
+| **Model Architecture** | MobileNetV2 with custom classifier |
+| **Batch Size** | 32 |
+| **Learning Rate** | 0.001 (Adam optimizer) |
+| **Epochs** | 25-30 (with early stopping) |
+| **Weight Decay** | 1e-4 |
+| **Input Resolution** | 224×224×3 |
+| **Parameters** | ~3M trainable parameters |
+
+### Hardware & Performance
+| Specification | Value |
+|---------------|-------|
+| **Training Hardware** | Apple Silicon M3 (MPS) |
+| **Training Time** | 10-15 minutes |
+| **Training Location** | Local machine |
+| **Memory Usage** | ~4GB peak during training |
+| **Final Model Size** | 36MB (.pth format) |
+
+### Data Augmentation Pipeline
+- **Random Horizontal Flip**: 50% probability
+- **Random Rotation**: ±15 degrees
+- **Color Jitter**: Brightness ±30%, Contrast ±30%, Saturation ±20%
+- **Resize & Normalize**: ImageNet statistics
+- **Additional**: Random crop for spatial invariance
+
+### Training Process Details
+| Stage | Description | Duration |
+|-------|-------------|----------|
+| **Dataset Download** | Automatic Kaggle ASL dataset download | ~2 minutes |
+| **Data Loading** | Image preprocessing and augmentation setup | ~30 seconds |
+| **Model Initialization** | MobileNetV2 backbone + custom classifier | ~10 seconds |
+| **Training Loop** | 25-30 epochs with validation | ~10-12 minutes |
+| **Model Export** | Save best checkpoint with metadata | ~5 seconds |
+| **Total Time** | End-to-end automated training | **~15 minutes** |
+
+**Training Command Used:**
+```bash
+python -m src.asl_dl.training.train --mode kaggle_abc
+```
+
+**Hardware Specifications (Local Training):**
+- **CPU**: Apple M3 Pro (11-core)  
+- **GPU**: Apple M3 Pro GPU (14-core) with Metal Performance Shaders
+- **RAM**: 18GB unified memory
+- **Storage**: SSD (local dataset and model storage)
+- **OS**: macOS Sonoma 14.4
+
 ## 📈 Performance Metrics
 
 ### Model Performance
