@@ -108,7 +108,7 @@ best_hand = score_candidates(candidates)
 | **Model Architecture** | MobileNetV2 with custom classifier |
 | **Batch Size** | 32 |
 | **Learning Rate** | 0.001 (Adam optimizer) |
-| **Epochs** | 25-30 (with early stopping) |
+| **Epochs** | 30 (optimized run) |
 | **Weight Decay** | 1e-4 |
 | **Input Resolution** | 224×224×3 |
 | **Parameters** | ~3M trainable parameters |
@@ -117,7 +117,7 @@ best_hand = score_candidates(candidates)
 | Specification | Value |
 |---------------|-------|
 | **Training Hardware** | Apple Silicon M3 (MPS) |
-| **Training Time** | 10-15 minutes |
+| **Training Time** | 42 minutes (optimized run) |
 | **Training Location** | Local machine |
 | **Memory Usage** | ~4GB peak during training |
 | **Final Model Size** | 36MB (.pth format) |
@@ -135,9 +135,11 @@ best_hand = score_candidates(candidates)
 | **Dataset Download** | Automatic Kaggle ASL dataset download | ~2 minutes |
 | **Data Loading** | Image preprocessing and augmentation setup | ~30 seconds |
 | **Model Initialization** | MobileNetV2 backbone + custom classifier | ~10 seconds |
-| **Training Loop** | 25-30 epochs with validation | ~10-12 minutes |
+| **Training Loop** | 30 epochs with validation | ~40 minutes |
 | **Model Export** | Save best checkpoint with metadata | ~5 seconds |
-| **Total Time** | End-to-end automated training | **~15 minutes** |
+| **Total Time** | End-to-end automated training | **~42 minutes** |
+
+**Note**: This represents the final optimized training run. Initial experiments showed some confusion between letters A and C, leading to enhanced data augmentation and extended training for improved discrimination between similar hand shapes.
 
 **Training Command Used:**
 ```bash
@@ -171,7 +173,7 @@ Per-Class Results:
 | Inference FPS | 30+ | 30 |
 | Model Size | 36MB | <50MB |
 | Accuracy | 92.9% | >90% |
-| GPU Training Time | 10-15 min | <30 min |
+| GPU Training Time | 42 min | <60 min |
 
 ## 🎮 Usage Controls
 
