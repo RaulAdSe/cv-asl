@@ -1,7 +1,7 @@
 # ASL Real-Time Recognition System
 
 A complete real-time American Sign Language recognition system featuring advanced computer vision algorithms, MobileNetV2 deep learning, and comprehensive evaluation tools for accurate hand sign classification.
-[Demo here]([https://pages.github.com/](https://www.linkedin.com/posts/raul-adell-segarra-774564231_what-better-way-to-learn-computer-vision-activity-7345526541247787008-IJZ_?utm_source=share&utm_medium=member_desktop&rcm=ACoAADns0UgBKxhhNAi2zgtNeHq0kyn9Sv2X3O4))
+[Demo here](https://www.linkedin.com/posts/raul-adell-segarra-774564231_what-better-way-to-learn-computer-vision-activity-7345526541247787008-IJZ_?utm_source=share&utm_medium=member_desktop&rcm=ACoAADns0UgBKxhhNAi2zgtNeHq0kyn9Sv2X3O4)
 
 ## Overview
 
